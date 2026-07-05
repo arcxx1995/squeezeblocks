@@ -79,5 +79,5 @@ ${parts.join('\n')}
 </svg>
 `;
 
-writeFileSync(new URL('../public/assets/demo.svg', import.meta.url), svg);
-console.log(`wrote public/assets/demo.svg (${N} edges, ${boxes.length} boxes)`);
+writeFileSync(new URL('../public/assets/demo-v2.svg', import.meta.url), svg);
+console.log(`wrote public/assets/demo-v2.svg (${N} edges, ${boxes.length} boxes)`);

@@ -6,7 +6,7 @@
 
 <br />
 
-<img src="public/assets/demo.svg" alt="A pixel-art Dots and Boxes match playing out" width="300" />
+<img src="public/assets/demo-v2.svg" alt="A pixel-art Dots and Boxes match playing out" width="300" />
 
 <br />
 <br />
@@ -91,7 +91,7 @@ npm run type-check   # tsc --build
 npm run deploy       # type-check + lint + devvit upload
 ```
 
-> Regenerate the animation above: `node tools/gen-anim.mjs`
+> Regenerate the animation above: `node tools/gen-anim.mjs` → `public/assets/demo-v2.svg`
 
 </details>
 
