@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="squeezeblocks — a 3x3 dot grid with two captured boxes">
+  <!-- App tile -->
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="#0a0a0a"/>
+
+  <!-- Two captured boxes, same as the splash: lilac top-left, lime bottom-right. -->
+  <rect x="128" y="128" width="128" height="128" rx="16" fill="#c5b0f4"/>
+  <rect x="256" y="256" width="128" height="128" rx="16" fill="#dceeb1"/>
+
+  <!-- 3x3 white dot grid, on top. -->
+  <g fill="#ffffff">
+    <circle cx="128" cy="128" r="14"/>
+    <circle cx="256" cy="128" r="14"/>
+    <circle cx="384" cy="128" r="14"/>
+    <circle cx="128" cy="256" r="14"/>
+    <circle cx="256" cy="256" r="14"/>
+    <circle cx="384" cy="256" r="14"/>
+    <circle cx="128" cy="384" r="14"/>
+    <circle cx="256" cy="384" r="14"/>
+    <circle cx="384" cy="384" r="14"/>
+  </g>
+</svg>

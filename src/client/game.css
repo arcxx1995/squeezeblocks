@@ -1,0 +1,120 @@
+@import "tailwindcss";
+
+@font-face {
+  font-family: "Geist Pixel";
+  src: url("/assets/GeistPixel-Square.woff2") format("woff2");
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+:root {
+  --background: #000000;
+  --foreground: #ffffff;
+  /* Phone-width content column (~384px). Phones fill it edge-to-edge;
+     larger screens center it as a phone-shaped frame. */
+  --app-column-width: 24rem;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  overflow: hidden;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: "Geist Pixel", ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+  font-feature-settings: "kern";
+  overscroll-behavior: none;
+}
+
+#root {
+  width: 100%;
+  height: 100dvh;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Keyboard focus ring for every action button (most lack a per-button style). */
+button:focus-visible {
+  outline: 2px solid #c5b0f4;
+  outline-offset: 2px;
+}
+
+/* Dot FX: soft halo pulse while a dot is held, one-shot bloom when joined. */
+@keyframes dot-hold {
+  0%,
+  100% {
+    r: 9px;
+    opacity: 0.4;
+  }
+  50% {
+    r: 12px;
+    opacity: 0.18;
+  }
+}
+.dot-hold {
+  animation: dot-hold 900ms ease-in-out infinite;
+}
+@keyframes dot-bloom {
+  0% {
+    r: 6px;
+    opacity: 0.6;
+  }
+  100% {
+    r: 17px;
+    opacity: 0;
+  }
+}
+.dot-bloom {
+  animation: dot-bloom 440ms ease-out forwards;
+}
+
+/* Edge-to-edge black on every device. Content sits in a centered column
+   that phones fill completely and tablets center for readability. */
+.app-phone-viewport {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--background);
+}
+
+.app-phone-screen {
+  width: 100%;
+  max-width: var(--app-column-width);
+  height: 100dvh;
+  min-height: 0;
+  /* The board is flex-1 with min-h-0 and shrinks to absorb slack, so on most
+     phones everything fits with no scroll. On very short screens (or the tall
+     done screen: result + streak panel + several buttons) content can still
+     exceed the viewport — allow vertical scroll so the bottom button is always
+     reachable instead of being clipped off-screen. */
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  background: var(--background);
+  color: var(--foreground);
+  /* Keep a real top/bottom gap on every device. On phones the safe-area inset
+     adds to it; on desktop the inset is 0, so without the base 1rem the bottom
+     button (resign) would sit flush against the frame edge. */
+  padding-top: calc(1rem + env(safe-area-inset-top));
+  padding-bottom: calc(1rem + env(safe-area-inset-bottom));
+}
+
+/* Action buttons (skip/resign/rematch/new game) are direct children of the
+   screen. Keep them at full height so a short viewport scrolls instead of
+   compressing them out of sight. */
+.app-phone-screen > button {
+  flex-shrink: 0;
+}
+
+@media (min-width: 700px) {
+  .app-phone-screen {
+    height: min(100dvh, 52rem);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 28px;
+  }
+}
