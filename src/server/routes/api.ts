@@ -1,0 +1,265 @@
+import { Hono } from 'hono';
+import { context, reddit } from '@devvit/web/server';
+import type {
+  ApiError,
+  DailyView,
+  MoveRequest,
+  OnlineGame,
+  OnlineView,
+} from '../../shared/online';
+import { applyBotMove, applyMove, applyResign, applySkip, createGame, findOpenGame, joinGame, loadGame, seedRematch } from '../core/game';
+import { getStats, topLeaderboard } from '../core/stats';
+import { dailyBoard, isDailyPost, playedToday, recordDaily, seedFor, today } from '../core/daily';
+import { createPost, postCommentUrl } from '../core/post';
+import { broadcast, notifyNextTurn, notifyRematchInvite, notifyResignWin } from '../core/notify';
+
+export const api = new Hono();
+
+function requirePostId(): string {
+  const { postId } = context;
+  if (!postId) throw new Error('postId is required but missing from context');
+  return postId;
+}
+
+async function view(game: OnlineGame, revealOrder?: string[]): Promise<OnlineView> {
+  const me = (await reddit.getCurrentUsername()) ?? null;
+  // Retention panel: the viewer's own streak plus the subreddit board. Two cheap
+  // reads per response; realtime pushes carry only the game, so the client keeps
+  // the last stats it saw and these HTTP responses refresh them.
+  const [myStats, leaderboard] = await Promise.all([
+    me ? getStats(me) : Promise.resolve(undefined),
+    topLeaderboard(),
+  ]);
+  return {
+    game,
+    me,
+    serverNow: Date.now(),
+    ...(revealOrder && revealOrder.length > 0 ? { revealOrder } : {}),
+    ...(myStats ? { myStats } : {}),
+    ...(leaderboard.length > 0 ? { leaderboard } : {}),
+  };
+}
+
+// Any signed-in user can spin up a fresh game post — no moderator needed.
+api.post('/new-game', async (c) => {
+  try {
+    const post = await createPost();
+    const url = postCommentUrl(post.id, context.subredditName);
+    return c.json<{ url: string }>({ url });
+  } catch (error) {
+    return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
+  }
+});
+
+// Matchmaking: pair the caller with a waiting opponent in one tap.
+// If an open lobby exists, seat them into it (`url` → client navigates there and
+// the game starts). Otherwise seat them into their own post and advertise it, so
+// the *next* searcher finds them — two simultaneous searchers pair instead of
+// both getting "none open". `url: null` + `view` = you're now the waiter.
+api.post('/find-open', async (c) => {
+  try {
+    const postId = requirePostId();
+    const username = await reddit.getCurrentUsername();
+    if (!username) throw new Error('You must be signed in to Reddit to find a game');
+
+    const openId = await findOpenGame(username);
+    // Only navigate when the match is on a DIFFERENT post. If the open game is
+    // the very post the caller is already viewing (both players in this post's
+    // lobby), navigating there is a needless full reload — join in place and
+    // return the view instead, exactly like the fall-through below.
+    if (openId && openId !== postId) {
+      try {
+        const joined = await joinGame(openId, username);
+        if (joined.phase === 'playing') void notifyNextTurn(joined, '');
+        await broadcast(joined);
+        return c.json<{ url: string | null }>({
+          url: postCommentUrl(openId, context.subredditName),
+        });
+      } catch {
+        // Lost the seat to another joiner between find and join — fall through
+        // and become a waiter ourselves.
+      }
+    }
+
+    // Match is on this post (or none open / we lost the race): seat the caller
+    // here and return the view. No url → the client applies it without a reload.
+    const game = await joinGame(postId, username);
+    if (game.phase === 'playing') void notifyNextTurn(game, '');
+    await broadcast(game);
+    return c.json<{ url: string | null; view: OnlineView }>({
+      url: null,
+      view: await view(game),
+    });
+  } catch (error) {
+    return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
+  }
+});
+
+api.get('/init', async (c) => {
+  try {
+    const postId = requirePostId();
+    const game = (await loadGame(postId)) ?? (await createGame(postId));
+    const v = await view(game);
+    return c.json<OnlineView>(
+      (await isDailyPost(postId)) ? { ...v, dailyPost: true } : v,
+    );
+  } catch (error) {
+    return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
+  }
+});
+
+// Splash-only flag: lets the fast inline feed view pick its headline without
+// loading the game. One redis GET, no game create.
+api.get('/splash', async (c) => {
+  try {
+    return c.json<{ daily: boolean }>({ daily: await isDailyPost(requirePostId()) });
+  } catch (error) {
+    return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
+  }
+});
+
+api.post('/join', async (c) => {
+  try {
+    const postId = requirePostId();
+    const username = await reddit.getCurrentUsername();
+    if (!username) throw new Error('You must be signed in to Reddit to join');
+    const body = (await c.req.json().catch(() => ({}))) as { withBots?: boolean };
+    const game = await joinGame(postId, username, body.withBots === true);
+    // A join that fills the table starts play — DM whoever is up first
+    // (previousPlayerId '' → never matches, so seat 0 gets the opening nudge).
+    if (game.phase === 'playing') void notifyNextTurn(game, '');
+    await broadcast(game);
+    return c.json<OnlineView>(await view(game));
+  } catch (error) {
+    return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
+  }
+});
+
+api.post('/bot', async (c) => {
+  try {
+    const postId = requirePostId();
+    const username = await reddit.getCurrentUsername();
+    if (!username) throw new Error('You must be signed in to Reddit');
+    const current = await loadGame(postId);
+    if (!current || !current.seats.some((s) => s.id === username && !s.isBot)) {
+      throw new Error('Only a human player in this game can advance a bot');
+    }
+    const { game, revealOrder, previousPlayerId } = await applyBotMove(postId);
+    void notifyNextTurn(game, previousPlayerId);
+    await broadcast(game, revealOrder);
+    return c.json<OnlineView>(await view(game, revealOrder));
+  } catch (error) {
+    return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
+  }
+});
+
+api.post('/move', async (c) => {
+  try {
+    const postId = requirePostId();
+    const username = await reddit.getCurrentUsername();
+    if (!username) throw new Error('You must be signed in to Reddit to play');
+    const move = await c.req.json<MoveRequest>();
+    const game = await applyMove(postId, username, move);
+    void notifyNextTurn(game, username);
+    await broadcast(game);
+    return c.json<OnlineView>(await view(game));
+  } catch (error) {
+    return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
+  }
+});
+
+api.post('/skip', async (c) => {
+  try {
+    const postId = requirePostId();
+    const username = await reddit.getCurrentUsername();
+    if (!username) throw new Error('You must be signed in to Reddit to play');
+    const game = await applySkip(postId, username);
+    void notifyNextTurn(game, username);
+    await broadcast(game);
+    return c.json<OnlineView>(await view(game));
+  } catch (error) {
+    return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
+  }
+});
+
+// Resign: end the game and hand the win to the opponent.
+api.post('/resign', async (c) => {
+  try {
+    const postId = requirePostId();
+    const username = await reddit.getCurrentUsername();
+    if (!username) throw new Error('You must be signed in to Reddit to play');
+    const game = await applyResign(postId, username);
+    void notifyResignWin(game, username);
+    await broadcast(game);
+    return c.json<OnlineView>(await view(game));
+  } catch (error) {
+    return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
+  }
+});
+
+// Rematch: spin up a fresh post with the caller seated and the opponent's seat
+// reserved, then DM them the link. The loop back to the same person.
+api.post('/rematch', async (c) => {
+  try {
+    const postId = requirePostId();
+    const username = await reddit.getCurrentUsername();
+    if (!username) throw new Error('You must be signed in to Reddit');
+    const game = await loadGame(postId);
+    if (!game || game.phase !== 'done') {
+      throw new Error('Rematch is only available once the game is over');
+    }
+    const meSeat = game.seats.find((s) => s.id === username && !s.isBot);
+    if (!meSeat) throw new Error('Only a player in this game can offer a rematch');
+    const opponent = game.seats.find((s) => s.id !== username && !s.isBot);
+    if (!opponent) throw new Error('No human opponent to rematch');
+
+    const post = await createPost();
+    await seedRematch(post.id, username, meSeat.name, opponent.id);
+    const url = postCommentUrl(post.id, context.subredditName);
+    void notifyRematchInvite(opponent.id, meSeat.name, url);
+    return c.json<{ url: string }>({ url });
+  } catch (error) {
+    return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
+  }
+});
+
+// Daily challenge state: today's seed (so the client plays the exact day's
+// game), your result if you've already played, and the day's board.
+api.get('/daily', async (c) => {
+  try {
+    const me = (await reddit.getCurrentUsername()) ?? null;
+    const date = today();
+    const [played, board] = await Promise.all([
+      me ? playedToday(me, date) : Promise.resolve(null),
+      dailyBoard(date),
+    ]);
+    return c.json<DailyView>({ date, seed: seedFor(date), me, played, board });
+  } catch (error) {
+    return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
+  }
+});
+
+// Submit a finished daily run: server replays the moves to score it (client
+// score is never trusted), records it, and returns the updated board.
+api.post('/daily', async (c) => {
+  try {
+    const me = await reddit.getCurrentUsername();
+    if (!me) throw new Error('You must be signed in to Reddit to play');
+    const body = (await c.req.json().catch(() => ({}))) as { moves?: MoveRequest[] };
+    if (!Array.isArray(body.moves)) throw new Error('No moves submitted');
+    const { result, board } = await recordDaily(me, body.moves);
+    return c.json<DailyView>({
+      date: result.date,
+      seed: seedFor(result.date),
+      me,
+      played: result,
+      board,
+    });
+  } catch (error) {
+    return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
+  }
+});
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : 'Unknown error';
+}
