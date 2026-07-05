@@ -7,9 +7,9 @@ const COLS = 4, ROWS = 4;          // dots per side -> (COLS-1)x(ROWS-1) boxes
 const SP = 64, M = 40;             // dot spacing, margin
 const PERIOD = 10;                 // loop length (s)
 const HOLD = 0.9;                  // fraction where the full board snaps back to empty
-const P = {                        // "Sweetie-16"-ish retro palette
-  bg: '#1a1c2c', grid: '#2a2c44', dot: '#f4f4f4',
-  lit: '#ffcd75', p1: '#ef7d57', p2: '#41a6f6', ink: '#94b0c2',
+const P = {                        // matches the in-game palette (engine.ts seats + board.tsx)
+  bg: '#000000', grid: '#2b2b2b', dot: '#ffffff',
+  lit: '#ffffff', p1: '#C5B0F4' /* Lilac */, p2: '#DCEEB1' /* Lime */,
 };
 
 const dx = (c) => M + c * SP;

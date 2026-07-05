@@ -603,31 +603,37 @@ export function OnlineGame() {
         </section>
       ) : null}
 
-      <section className="rounded-lg border border-white/15 bg-[#C5B0F4] p-4 text-black">
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0">
-            <p className="truncate text-xl font-bold leading-snug">
-              {game.phase === "done"
-                ? winners.length > 1
-                  ? "Draw game"
-                  : `${winners[0]?.id === me ? "You win" : `${winners[0]?.name} wins`}`
-                : isMyTurn
-                  ? "Your turn"
-                  : `${activePlayer?.name}'s turn`}
-            </p>
-            <p className="font-mono text-xs uppercase tracking-[0.12em] text-black/65">
-              {capturedBoxes} of {TOTAL_BOXES} boxes captured
-            </p>
+      {/* Turn banner — playing only. On the done screen the Final-result panel
+          below carries the outcome, so this is dropped to keep the whole end
+          screen on one page (no scroll). */}
+      {game.phase === "playing" ? (
+        <section className="rounded-lg border border-white/15 bg-[#C5B0F4] p-4 text-black">
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="truncate text-xl font-bold leading-snug">
+                {isMyTurn ? "Your turn" : `${activePlayer?.name}'s turn`}
+              </p>
+              <p className="font-mono text-xs uppercase tracking-[0.12em] text-black/65">
+                {capturedBoxes} of {TOTAL_BOXES} boxes captured
+              </p>
+            </div>
+            <div className="grid size-14 place-items-center rounded-full border-4 border-white bg-black font-mono text-sm font-normal text-white">
+              {formatRemaining(remainingMs)}
+            </div>
           </div>
-          <div className="grid size-14 place-items-center rounded-full border-4 border-white bg-black font-mono text-sm font-normal text-white">
-            {game.phase === "done" ? "OK" : formatRemaining(remainingMs)}
-          </div>
-        </div>
-      </section>
+        </section>
+      ) : null}
 
       {game.phase === "done" ? (
         <section className="rounded-lg border border-white/15 bg-[#DCEEB1] p-4 text-black">
-          <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-black/60">
+          <p className="text-xl font-bold leading-snug">
+            {winners.length > 1
+              ? "Draw game"
+              : winners[0]?.id === me
+                ? "You win"
+                : `${winners[0]?.name} wins`}
+          </p>
+          <p className="mt-2 font-mono text-[10px] uppercase tracking-[0.14em] text-black/60">
             Final result
           </p>
           <div className="mt-2 flex flex-col gap-1.5">
@@ -673,6 +679,12 @@ export function OnlineGame() {
           />
         </section>
       ) : null}
+
+      {/* Done screen has no flex-1 board, so this spacer absorbs the slack and
+          pushes the end-game buttons to the bottom (uniform gaps above, no
+          mid-frame float on tall/desktop views). Shrinks to 0 before it would
+          force a scroll. */}
+      {game.phase === "done" ? <div className="min-h-0 flex-1" /> : null}
 
       {/* Skip appears once the active turn expires. */}
       {canSkip ? (
