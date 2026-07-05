@@ -87,13 +87,11 @@ button:focus-visible {
   max-width: var(--app-column-width);
   height: 100dvh;
   min-height: 0;
-  /* The board is flex-1 with min-h-0 and shrinks to absorb slack, so on most
-     phones everything fits with no scroll. On very short screens (or the tall
-     done screen: result + streak panel + several buttons) content can still
-     exceed the viewport — allow vertical scroll so the bottom button is always
-     reachable instead of being clipped off-screen. */
-  overflow-x: hidden;
-  overflow-y: auto;
+  /* The screen itself never scrolls — it's pinned to the viewport. While
+     playing the board is flex-1 and absorbs slack; on the done screen the
+     leaderboard list is the flex-1 min-h-0 scroll region, so growing match
+     history scrolls inside the panel and the buttons stay put at the bottom. */
+  overflow: hidden;
   -webkit-overflow-scrolling: touch;
   background: var(--background);
   color: var(--foreground);

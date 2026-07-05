@@ -102,6 +102,13 @@ export function OnlineGame() {
   );
   const prevOwnedLinesRef = useRef<Set<string> | null>(null);
   const revealTimersRef = useRef<number[]>([]);
+  // Latest applied/optimistic view, kept in sync synchronously so a burst of
+  // capture taps each validate against the previous tap's board (React state
+  // lags a render). The queue holds moves not yet confirmed by the server; a
+  // single sender drains them in order so the server sees them serially.
+  const viewRef = useRef<OnlineView | null>(null);
+  const moveQueueRef = useRef<{ orientation: LineOrientation; row: number; col: number }[]>([]);
+  const sendingRef = useRef(false);
 
   const clearRevealTimers = useCallback(() => {
     revealTimersRef.current.forEach((t) => window.clearTimeout(t));
@@ -164,6 +171,7 @@ export function OnlineGame() {
         setHiddenLineIds(new Set());
       }
 
+      viewRef.current = next;
       setView(next);
     },
     [clearRevealTimers],
@@ -297,16 +305,55 @@ export function OnlineGame() {
     }
   };
 
+  // Send queued moves to the server one at a time, in order — a capture keeps
+  // the turn, so move N+1 is only legal after move N has committed. Input isn't
+  // blocked while this runs (the board gates on the optimistic turn, not on
+  // `pending`), so a capture chain paints instantly and the sends catch up.
+  const drainQueue = async () => {
+    if (sendingRef.current) return; // a sender is already draining the queue
+    sendingRef.current = true;
+    pendingRef.current = true; // gate realtime pushes (they'd clobber optimism)
+    setPending(true);
+    let last: OnlineView | null = null;
+    try {
+      while (moveQueueRef.current.length > 0) {
+        last = await callApi("/api/move", moveQueueRef.current.shift()!);
+      }
+    } catch (err) {
+      // A rejected move means our optimistic board diverged — drop the queue and
+      // resync to the authoritative state.
+      moveQueueRef.current = [];
+      setError(err instanceof Error ? err.message : "Move rejected");
+      void refresh();
+      last = null;
+    } finally {
+      sendingRef.current = false;
+      pendingRef.current = false;
+      setPending(false);
+    }
+    // Reconcile to the confirmed view once the chain fully drains (syncs clock +
+    // stats). Skip if new taps queued or a fresh sender started — that drain
+    // reconciles instead, and applying here could revert an unsent move.
+    if (last && moveQueueRef.current.length === 0 && !sendingRef.current) {
+      applyView(last);
+    }
+  };
+
   const drawLine = async (
     orientation: LineOrientation,
     row: number,
     col: number,
   ) => {
-    const state = view?.game.state;
-    if (!view || !state) return;
-    // Optimistic paint: run the pure engine locally and show the line + turn
-    // switch instantly, before the server round-trip. Same reference back means
-    // the move was invalid (owned line / not active) — ignore it.
+    // Validate against the latest optimistic board (viewRef), not React state,
+    // so a fast second capture tap builds on the first.
+    const current = viewRef.current;
+    const state = current?.game.state;
+    if (!current || !state) return;
+    // Only draw on your own optimistic turn — closes the one-render window where
+    // a tap could land just after a turn-ending move and paint as the opponent.
+    if (state.players[state.currentPlayerIndex]?.id !== current.me) return;
+    // Run the pure engine locally and show the line + turn switch instantly.
+    // Same reference back means the move was invalid (owned line / not active).
     const optimistic = submitLine(
       state,
       orientation,
@@ -321,26 +368,21 @@ export function OnlineGame() {
     optimistic.turnStartedAt = state.turnStartedAt;
     optimistic.turnDeadlineAt = state.turnDeadlineAt;
 
-    setBusy(true);
     setError(null);
     playHaptic();
     setLastMoveId(lineId(orientation, row, col));
     const optimisticView: OnlineView = {
-      ...view,
-      game: { ...view.game, state: optimistic },
+      ...current,
+      game: { ...current.game, state: optimistic },
     };
     // Seed the reveal baseline so the authoritative server view doesn't re-animate
-    // the line we just painted.
+    // the line we just painted, and sync viewRef so the next tap sees this move.
     prevOwnedLinesRef.current = ownedLineIds(optimisticView);
+    viewRef.current = optimisticView;
     setView(optimisticView);
-    try {
-      applyView(await callApi("/api/move", { orientation, row, col }));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Move rejected");
-      void refresh();
-    } finally {
-      setBusy(false);
-    }
+
+    moveQueueRef.current.push({ orientation, row, col });
+    void drainQueue();
   };
 
   const newGame = async () => {
@@ -670,21 +712,23 @@ export function OnlineGame() {
           and end-game buttons need (the screen doesn't scroll). */}
       {game.phase === "playing" ? (
         <section className="flex min-h-0 flex-1 items-center justify-center">
+          {/* interactive gates on the optimistic turn, not `pending` — a capture
+              keeps the turn, and blocking on the in-flight send would drop fast
+              chained taps. isMyTurn flips false optimistically after a
+              turn-ending move, so off-turn input is still blocked. */}
           <GameBoard
             game={state}
             lastMoveId={lastMoveId}
             onDrawLine={drawLine}
-            interactive={isMyTurn && !pending && hiddenLineIds.size === 0}
+            interactive={isMyTurn && hiddenLineIds.size === 0}
             hiddenLineIds={hiddenLineIds}
           />
         </section>
       ) : null}
 
-      {/* Done screen has no flex-1 board, so this spacer absorbs the slack and
-          pushes the end-game buttons to the bottom (uniform gaps above, no
-          mid-frame float on tall/desktop views). Shrinks to 0 before it would
-          force a scroll. */}
-      {game.phase === "done" ? <div className="min-h-0 flex-1" /> : null}
+      {/* Done screen: the StreakPanel is flex-1 and absorbs the slack (its
+          leaderboard list scrolls internally), pushing the buttons to the
+          bottom. No separate spacer needed. */}
 
       {/* Skip appears once the active turn expires. */}
       {canSkip ? (
@@ -743,7 +787,7 @@ export function OnlineGame() {
           type="button"
           disabled={pending}
           onClick={() => setScreen("daily")}
-          className="min-h-11 rounded-full py-2 border border-[#DCEEB1]/40 bg-[#DCEEB1]/10 px-5 text-sm font-medium text-[#DCEEB1] transition hover:border-[#DCEEB1] disabled:opacity-50"
+          className="min-h-12 rounded-full py-2 border border-[#DCEEB1]/40 bg-[#DCEEB1]/10 px-6 text-base font-medium text-[#DCEEB1] transition hover:border-[#DCEEB1] disabled:opacity-50"
         >
           🔥 Today&apos;s daily challenge
         </button>
@@ -826,9 +870,9 @@ function StreakPanel({
 }) {
   if (!stats && (!board || board.length === 0)) return null;
   return (
-    <section className="rounded-lg border border-white/15 bg-[#F4ECD6] p-4 text-black">
+    <section className="flex min-h-0 flex-1 flex-col rounded-lg border border-white/15 bg-[#F4ECD6] p-4 text-black">
       {stats ? (
-        <div className="flex items-baseline justify-between gap-3">
+        <div className="flex shrink-0 items-baseline justify-between gap-3">
           <span className="text-lg font-bold">
             {stats.streak > 0 ? `🔥 ${stats.streak}-win streak` : "Streak reset"}
           </span>
@@ -838,12 +882,12 @@ function StreakPanel({
         </div>
       ) : null}
       {board && board.length > 0 ? (
-        <div className="mt-3">
-          <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-black/60">
+        <div className="mt-3 flex min-h-0 flex-1 flex-col">
+          <p className="shrink-0 font-mono text-[10px] uppercase tracking-[0.14em] text-black/60">
             Top players
           </p>
-          <ol className="mt-1.5 flex flex-col gap-1">
-            {board.slice(0, 3).map((row, i) => (
+          <ol className="mt-1.5 flex min-h-0 flex-1 flex-col gap-1 overflow-y-auto">
+            {board.slice(0, 50).map((row, i) => (
               <li
                 key={row.name}
                 className={`flex items-center justify-between text-sm ${
