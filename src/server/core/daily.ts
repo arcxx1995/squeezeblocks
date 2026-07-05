@@ -49,6 +49,25 @@ export async function releaseDailyPost(date = today()): Promise<void> {
   await redis.del(dailyPostClaimKey(date));
 }
 
+// Post id of today's daily, if one was created — lets the menu reuse it instead
+// of spawning duplicates when tapped repeatedly.
+const dailyPostIdKey = (date: string) => `daily-post-id:${date}`;
+
+export async function getDailyPostId(date = today()): Promise<string | null> {
+  return (await redis.get(dailyPostIdKey(date))) ?? null;
+}
+
+export async function setDailyPostId(postId: string, date = today()): Promise<void> {
+  await redis.set(dailyPostIdKey(date), postId);
+}
+
+// Clear today's daily bookkeeping so a fresh one can be made (used by delete-all,
+// where the tracked post has just been removed).
+export async function forgetDailyPost(date = today()): Promise<void> {
+  await redis.del(dailyPostIdKey(date));
+  await redis.del(dailyPostClaimKey(date));
+}
+
 export async function playedToday(
   user: string,
   date = today(),

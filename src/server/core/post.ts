@@ -1,6 +1,6 @@
 import { reddit, context } from '@devvit/web/server';
-import { createGame } from './game';
-import { markDailyPost } from './daily';
+import { clearRegistries, createGame, purgeGame } from './game';
+import { forgetDailyPost, markDailyPost, setDailyPostId, today } from './daily';
 
 // Reddit thing-ids (post.id, context.postId) are `t3_`-prefixed; comment URLs
 // need the bare id. Single source of truth for the strip — three call sites
@@ -35,25 +35,35 @@ export const deleteAllPosts = async (): Promise<number> => {
     .all();
   for (const post of posts) {
     await post.remove(false);
+    // Also drop the Redis game so a removed lobby stops being matchmakable.
+    await purgeGame(post.id);
   }
+  // Sweep the registries wholesale too, in case any listing outlived its post.
+  await clearRegistries();
+  // The tracked daily just got removed — forget it so the menu makes a fresh one.
+  await forgetDailyPost();
   return posts.length;
 };
 
 // The daily-challenge post: opens straight into the daily. Marked so the client
-// skips the lobby. Pinned to sticky slot 2 — the main app post owns slot 1, so
-// the daily sits directly below it deterministically (unstickied would float
-// above the app by recency whenever the app's slot-1 pin fails). `date`
-// (YYYY-MM-DD) is appended to the title so auto-posted days are distinguishable.
+// skips the lobby. Not stickied — a stickied custom post renders as a compact
+// pinned card (splash hidden until opened), so it floats in the feed as a full
+// inline splash card instead. The main app post owns sticky slot 1 and stays
+// above it regardless. `date` (YYYY-MM-DD) is appended to the title so
+// auto-posted days are distinguishable.
 export const createDailyPost = async (date?: string) => {
   const post = await reddit.submitCustomPost({
     title: `squeezeblocks — Daily Challenge 🔥${date ? ` (${date})` : ''}`,
   });
   await markDailyPost(post.id);
-  // Best-effort: needs mod. Slot 2 keeps it below the app's slot-1 pin.
+  await setDailyPostId(post.id, date ?? today());
+  // Surface it in the feed. Stickying used to do this implicitly; unstickied, an
+  // app-authored post can sit unapproved in the mod queue (invisible), so
+  // approve it explicitly. Best-effort: needs mod, must not fail the post.
   try {
-    await post.sticky(2);
+    await post.approve();
   } catch (error) {
-    console.error('daily post sticky failed:', error);
+    console.error('daily post approve failed:', error);
   }
   return post;
 };

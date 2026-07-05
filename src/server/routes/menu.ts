@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { UiResponse } from '@devvit/web/shared';
 import { context } from '@devvit/web/server';
 import { createDailyPost, createPost, deleteAllPosts, postCommentUrl } from '../core/post';
-import { today } from '../core/daily';
+import { getDailyPostId, today } from '../core/daily';
 
 export const menu = new Hono();
 
@@ -48,9 +48,13 @@ menu.post('/delete-all', async (c) => {
 
 menu.post('/daily-create', async (c) => {
   try {
-    const post = await createDailyPost(today());
+    const date = today();
+    // Idempotent: if today's daily already exists, go to it instead of spawning
+    // another (repeat taps used to litter the sub with duplicate dailies).
+    const existing = await getDailyPostId(date);
+    const postId = existing ?? (await createDailyPost(date)).id;
     return c.json<UiResponse>(
-      { navigateTo: postCommentUrl(post.id, context.subredditName) },
+      { navigateTo: postCommentUrl(postId, context.subredditName) },
       200
     );
   } catch (error) {

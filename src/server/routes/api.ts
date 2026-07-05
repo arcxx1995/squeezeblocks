@@ -2,12 +2,13 @@ import { Hono } from 'hono';
 import { context, reddit } from '@devvit/web/server';
 import type {
   ApiError,
+  DailyResult,
   DailyView,
   MoveRequest,
   OnlineGame,
   OnlineView,
 } from '../../shared/online';
-import { applyBotMove, applyMove, applyResign, applySkip, createGame, findOpenGame, joinGame, loadGame, seedRematch } from '../core/game';
+import { applyBotMove, applyMove, applyResign, applySkip, createGame, findOpenGame, joinGame, loadGame, rememberPendingPost, reusablePendingPost, seedRematch } from '../core/game';
 import { getStats, topLeaderboard } from '../core/stats';
 import { dailyBoard, isDailyPost, playedToday, recordDaily, seedFor, today } from '../core/daily';
 import { createPost, postCommentUrl } from '../core/post';
@@ -41,11 +42,20 @@ async function view(game: OnlineGame, revealOrder?: string[]): Promise<OnlineVie
 }
 
 // Any signed-in user can spin up a fresh game post — no moderator needed.
+// Guard against post spam: reuse the caller's own still-open lobby (a repeat tap
+// before anyone joined) instead of creating another.
 api.post('/new-game', async (c) => {
   try {
+    const username = await reddit.getCurrentUsername();
+    if (username) {
+      const reuse = await reusablePendingPost(username);
+      if (reuse) {
+        return c.json<{ url: string }>({ url: postCommentUrl(reuse, context.subredditName) });
+      }
+    }
     const post = await createPost();
-    const url = postCommentUrl(post.id, context.subredditName);
-    return c.json<{ url: string }>({ url });
+    if (username) await rememberPendingPost(username, post.id);
+    return c.json<{ url: string }>({ url: postCommentUrl(post.id, context.subredditName) });
   } catch (error) {
     return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
   }
@@ -62,11 +72,36 @@ api.post('/find-open', async (c) => {
     const username = await reddit.getCurrentUsername();
     if (!username) throw new Error('You must be signed in to Reddit to find a game');
 
+    // 1) Prefer someone already waiting in THIS post. Global matchmaking returns
+    // the oldest advertised lobby by createdAt, which — with stale test lobbies
+    // around — is some other post, so two people on the same post got yanked
+    // apart (finder navigates away, host stranded). Joining here is seamless: no
+    // navigate, and it pairs the two people actually looking at each other.
+    const here = await loadGame(postId);
+    const joinableHere =
+      here &&
+      here.phase === 'lobby' &&
+      here.seats.length >= 1 &&
+      here.seats.length < here.playerCount &&
+      !here.seats.some((s) => s.id === username) &&
+      !here.seats.some((s) => s.isBot) &&
+      !here.invitedId;
+    if (joinableHere) {
+      try {
+        const game = await joinGame(postId, username);
+        if (game.phase === 'playing') void notifyNextTurn(game, '');
+        await broadcast(game);
+        return c.json<{ url: string | null; view: OnlineView }>({
+          url: null,
+          view: await view(game),
+        });
+      } catch {
+        // Lost the seat between read and join — fall through to global search.
+      }
+    }
+
+    // 2) Otherwise match a stranger's open lobby on another post (navigate there).
     const openId = await findOpenGame(username);
-    // Only navigate when the match is on a DIFFERENT post. If the open game is
-    // the very post the caller is already viewing (both players in this post's
-    // lobby), navigating there is a needless full reload — join in place and
-    // return the view instead, exactly like the fall-through below.
     if (openId && openId !== postId) {
       try {
         const joined = await joinGame(openId, username);
@@ -81,8 +116,8 @@ api.post('/find-open', async (c) => {
       }
     }
 
-    // Match is on this post (or none open / we lost the race): seat the caller
-    // here and return the view. No url → the client applies it without a reload.
+    // 3) Nothing open: seat the caller here and advertise, so the next searcher
+    // finds them. No url → the client applies it without a reload.
     const game = await joinGame(postId, username);
     if (game.phase === 'playing') void notifyNextTurn(game, '');
     await broadcast(game);
@@ -108,11 +143,20 @@ api.get('/init', async (c) => {
   }
 });
 
-// Splash-only flag: lets the fast inline feed view pick its headline without
-// loading the game. One redis GET, no game create.
+// Splash-only info: lets the fast inline feed view pick its headline without
+// loading the game. For a daily post, also returns the viewer's result if they
+// already played today, so the card shows their score instead of inviting a
+// replay. Cheap: one redis GET for the flag, plus one more when it's a daily.
 api.get('/splash', async (c) => {
   try {
-    return c.json<{ daily: boolean }>({ daily: await isDailyPost(requirePostId()) });
+    const postId = requirePostId();
+    const daily = await isDailyPost(postId);
+    let played: DailyResult | null = null;
+    if (daily) {
+      const me = await reddit.getCurrentUsername();
+      if (me) played = await playedToday(me);
+    }
+    return c.json<{ daily: boolean; played: DailyResult | null }>({ daily, played });
   } catch (error) {
     return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
   }

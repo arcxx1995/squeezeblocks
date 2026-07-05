@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { connectRealtime, context, disconnectRealtime, navigateTo } from "@devvit/web/client";
+import { connectRealtime, context, disconnectRealtime, navigateTo, showToast } from "@devvit/web/client";
 import {
   BOX_COLS,
   BOX_ROWS,
@@ -424,8 +424,12 @@ export function OnlineGame() {
       if (!res.ok) throw new Error(data?.message ?? "Search failed");
       // Paired into an existing lobby → jump there (it's starting). Otherwise the
       // server seated us as the waiter; show that state so an opponent can find us.
-      if (data.url) navigateTo(data.url as string);
-      else if (data.view) applyView(data.view as OnlineView);
+      if (data.url) {
+        // Cross-post match needs a navigation (the game lives on that post) —
+        // flag it so the reload reads as "found a match", not a random refresh.
+        showToast("Opponent found — joining…");
+        navigateTo(data.url as string);
+      } else if (data.view) applyView(data.view as OnlineView);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Search failed");
     } finally {
@@ -469,8 +473,11 @@ export function OnlineGame() {
   }
 
   if (!view) {
+    // No how-to overlay during load — we don't yet know if this is a daily
+    // (result) post, and flashing the card over "See result" is jarring. The
+    // help still shows on the resolved lobby/playing/done screens below.
     return (
-      <Shell overlay={showHelp ? <HowToOverlay onClose={dismissHelp} /> : null}>
+      <Shell>
         <p className="font-mono text-sm text-white/60">
           {error ?? "Loading game…"}
         </p>

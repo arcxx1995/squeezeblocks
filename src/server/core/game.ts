@@ -51,6 +51,23 @@ export async function loadGame(postId: string): Promise<OnlineGame | null> {
   return raw ? (JSON.parse(raw) as OnlineGame) : null;
 }
 
+// Drop a post's game state and its matchmaking/scheduler registrations. Removing
+// a Reddit post does NOT delete its Redis game, so without this a removed lobby
+// stays "joinable" and keeps getting served by matchmaking. Used by the
+// delete-all cleanup.
+export async function purgeGame(postId: string): Promise<void> {
+  await redis.del(gameKey(postId));
+  await redis.zRem(OPEN_KEY, [postId]);
+  await redis.zRem(ACTIVE_KEY, [postId]);
+}
+
+// Nuke the matchmaking + active-sweep registries wholesale — a belt-and-braces
+// companion to per-post purge when clearing the whole subreddit.
+export async function clearRegistries(): Promise<void> {
+  await redis.del(OPEN_KEY);
+  await redis.del(ACTIVE_KEY);
+}
+
 // Grace window before the scheduler advances a bot turn. Lets the client
 // bot-driver (700ms) take a bot turn first, so the two don't both drive the
 // same bot and leapfrog each other. The scheduler only steps in if no client
@@ -128,6 +145,33 @@ export async function findOpenGame(
     return postId;
   }
   return null;
+}
+
+// Last post a user spun up via "New game", so a repeat tap reuses that lobby
+// instead of littering the sub with empty ones. Cleared implicitly: the post is
+// only reused while it's still an unstarted, non-full lobby.
+const pendingNewGameKey = (username: string) => `pending-newgame:${username}`;
+
+// The caller's most recent "New game" post if it's still a joinable, unstarted
+// lobby — else null (it filled, started, ended, or aged out), so a fresh post
+// is made instead.
+export async function reusablePendingPost(
+  username: string,
+  now = Date.now(),
+): Promise<string | null> {
+  const postId = await redis.get(pendingNewGameKey(username));
+  if (!postId) return null;
+  const game = await loadGame(postId);
+  const reusable =
+    game &&
+    game.phase === "lobby" &&
+    game.createdAt > now - LOBBY_TTL_MS &&
+    game.seats.length < game.playerCount;
+  return reusable ? postId : null;
+}
+
+export async function rememberPendingPost(username: string, postId: string): Promise<void> {
+  await redis.set(pendingNewGameKey(username), postId);
 }
 
 type GameMutator = (game: OnlineGame) => void;
