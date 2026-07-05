@@ -34,6 +34,9 @@ async function bump(username: string, won: boolean): Promise<void> {
     s.streak += 1;
     s.best = Math.max(s.best, s.streak);
     await redis.zAdd(LEADERBOARD_KEY, { member: username, score: s.wins });
+    // Flair mirrors the leaderboard metric (all-time wins). Only changes on a
+    // win, so no need to re-flair on a loss.
+    await setWinsFlair(username, s.wins);
   } else {
     s.losses += 1;
     s.streak = 0;
@@ -92,16 +95,15 @@ async function updateRatings(
     const s = before.get(seat.id)!;
     s.rating = Math.round(s.rating + delta.get(seat.id)!);
     await redis.set(statsKey(seat.id), JSON.stringify(s));
-    await setRatingFlair(seat.id, s.rating);
   }
 }
 
-async function setRatingFlair(username: string, rating: number): Promise<void> {
+async function setWinsFlair(username: string, wins: number): Promise<void> {
   try {
     await reddit.setUserFlair({
       subredditName: context.subredditName!,
       username,
-      text: `⚡ ${rating}`,
+      text: `🏆 ${wins}`,
     });
   } catch (error) {
     console.error(`flair set failed for ${username}: ${error}`);
