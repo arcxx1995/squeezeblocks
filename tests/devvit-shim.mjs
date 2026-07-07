@@ -6,6 +6,7 @@
 const store = new Map(); // key -> string
 const version = new Map(); // key -> number (bumped on every committed write)
 const zsets = new Map(); // key -> Map<member, score>
+const hashes = new Map(); // key -> Map<field, value>
 
 function bump(key) {
   version.set(key, (version.get(key) ?? 0) + 1);
@@ -51,6 +52,19 @@ export const redis = {
     if (!z) zsets.set(key, (z = new Map()));
     for (const { member, score } of flat) z.set(member, score);
   },
+  async hSetNX(key, field, value) {
+    let h = hashes.get(key);
+    if (!h) hashes.set(key, (h = new Map()));
+    if (h.has(field)) return 0;
+    h.set(field, value);
+    return 1;
+  },
+  async hDel(key, fields) {
+    const h = hashes.get(key);
+    if (!h) return;
+    for (const f of fields) h.delete(f);
+  },
+  async expire() {}, // TTLs are irrelevant in-memory
   async zRem(key, members) {
     const z = zsets.get(key);
     if (!z) return;
@@ -93,6 +107,7 @@ export function __reset() {
   store.clear();
   version.clear();
   zsets.clear();
+  hashes.clear();
   sentDMs.length = 0;
   sentRealtime.length = 0;
   setFlairs.length = 0;

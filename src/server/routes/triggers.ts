@@ -1,7 +1,9 @@
 import { Hono } from 'hono';
-import type { OnAppInstallRequest, TriggerResponse } from '@devvit/web/shared';
+import type { OnAppInstallRequest, OnPostDeleteRequest, TriggerResponse } from '@devvit/web/shared';
 import { context, redis } from '@devvit/web/server';
 import { createDailyPost, createOrReuseMainPost, SETUP_KEY } from '../core/post';
+import { purgeGame } from '../core/game';
+import { forgetDailyPost, getDailyPostId, unmarkDailyPost } from '../core/daily';
 
 export const triggers = new Hono();
 
@@ -48,5 +50,24 @@ triggers.post('/on-app-install', async (c) => {
       },
       400
     );
+  }
+});
+
+// Devvit rules require deleting a post's app data when the post is deleted.
+// purgeGame drops the game state (seats/usernames/moves), matchmaking and
+// scheduler registrations, and the per-seat booking hash; daily posts also
+// shed their flag and, if it's the tracked daily, the day's post-id claim so
+// the cron can mint a replacement.
+triggers.post('/on-post-delete', async (c) => {
+  try {
+    const input = await c.req.json<OnPostDeleteRequest>();
+    const postId = input.postId;
+    await purgeGame(postId);
+    await unmarkDailyPost(postId);
+    if ((await getDailyPostId()) === postId) await forgetDailyPost();
+    return c.json<TriggerResponse>({ status: 'success', message: `purged ${postId}` }, 200);
+  } catch (error) {
+    console.error(`on-post-delete purge failed: ${error}`);
+    return c.json<TriggerResponse>({ status: 'error', message: 'Failed to purge post data' }, 400);
   }
 });

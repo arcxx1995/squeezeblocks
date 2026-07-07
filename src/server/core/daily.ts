@@ -49,6 +49,12 @@ export async function isDailyPost(postId: string): Promise<boolean> {
   return (await redis.get(postFlagKey(postId))) === "1";
 }
 
+// Drop the daily flag for a deleted post (Devvit rules: purge post data on
+// PostDelete).
+export async function unmarkDailyPost(postId: string): Promise<void> {
+  await redis.del(postFlagKey(postId));
+}
+
 const dailyPostClaimKey = (date: string) => `daily-post-created:${date}`;
 
 // Claim the once-per-day daily post. Returns true for the first caller of the

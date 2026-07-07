@@ -1,4 +1,4 @@
-import { writeStats, getStats } from "../src/server/core/stats.ts";
+import { computeResultDeltas, writeStats, getStats } from "../src/server/core/stats.ts";
 import { __reset, setFlairs } from "./devvit-shim.mjs";
 
 let pass = 0, fail = 0;
@@ -8,20 +8,35 @@ function ok(cond, msg) {
 }
 
 // Minimal completed-game envelope: two humans, `winner` took the boxes.
-function game(winner) {
+function game(winner, postId = "p1") {
+  const score = (id) => (id === winner ? 13 : 12);
   return {
+    postId,
     seats: [
       { id: "alice", name: "alice", isBot: false },
       { id: "bob", name: "bob", isBot: false },
     ],
-    state: { status: "completed", winnerPlayerIds: [winner] },
+    state: {
+      status: "completed",
+      winnerPlayerIds: [winner],
+      players: [
+        { id: "alice", score: score("alice") },
+        { id: "bob", score: score("bob") },
+      ],
+    },
   };
+}
+
+// Mirror recordResultIfDone: freeze deltas from pre-game ratings, then book.
+async function book(g) {
+  g.resultDeltas = await computeResultDeltas(g);
+  return writeStats(g);
 }
 
 // Equal starting ratings (1000): winner gains K/2 = 12, loser drops 12.
 {
   __reset();
-  await writeStats(game("alice"));
+  await book(game("alice"));
   const a = await getStats("alice");
   const b = await getStats("bob");
   ok(a.rating === 1012, `winner 1000->1012, got ${a.rating}`);
@@ -29,14 +44,14 @@ function game(winner) {
   ok(a.rating + b.rating === 2000, "zero-sum: deltas cancel");
   ok(a.wins === 1 && b.losses === 1, "win/loss booked alongside ELO");
   const af = setFlairs.find((f) => f.username === "alice");
-  ok(af && af.text === "⚡ 1012", `flair set to rating, got ${af?.text}`);
+  ok(af && af.text === "🏆 1", `flair set to win count, got ${af?.text}`);
 }
 
 // Favorite (higher rating) beating underdog gains less than an even game.
 {
   __reset();
-  await writeStats(game("alice")); // alice 1012, bob 988
-  await writeStats(game("alice")); // alice favored now
+  await book(game("alice", "p1")); // alice 1012, bob 988
+  await book(game("alice", "p2")); // alice favored now
   const a = await getStats("alice");
   ok(a.rating - 1012 < 12, `favored win gains <12, gained ${a.rating - 1012}`);
 }
@@ -45,13 +60,21 @@ function game(winner) {
 {
   __reset();
   const g = {
+    postId: "p3",
     seats: [
       { id: "carol", name: "carol", isBot: false },
       { id: "bot-1", name: "Bot", isBot: true },
     ],
-    state: { status: "completed", winnerPlayerIds: ["carol"] },
+    state: {
+      status: "completed",
+      winnerPlayerIds: ["carol"],
+      players: [
+        { id: "carol", score: 13 },
+        { id: "bot-1", score: 12 },
+      ],
+    },
   };
-  await writeStats(g);
+  await book(g);
   const c = await getStats("carol");
   ok(c.rating === 1000, `bot game leaves ELO flat, got ${c.rating}`);
   ok(c.wins === 1, "bot game still books the win");
