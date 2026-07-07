@@ -8,7 +8,61 @@
   </head>
 
   <body>
-    <div id="root"></div>
+    <!-- Inline boot splash: visible instantly, replaced when React mounts.
+         Styles are inline so it renders even before game.css arrives. -->
+    <style>
+      #boot-splash {
+        height: 100dvh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 1.25rem;
+        background: #000;
+        color: #fff;
+        font-family: ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+        letter-spacing: 0.08em;
+      }
+      #boot-splash .dots {
+        display: grid;
+        grid-template-columns: repeat(3, 10px);
+        gap: 14px;
+      }
+      #boot-splash .dots span {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #c5b0f4;
+        animation: boot-pulse 1.2s ease-in-out infinite;
+      }
+      #boot-splash .dots span:nth-child(2n) {
+        animation-delay: 0.2s;
+      }
+      #boot-splash .dots span:nth-child(3n) {
+        animation-delay: 0.4s;
+      }
+      @keyframes boot-pulse {
+        0%,
+        100% {
+          opacity: 0.25;
+          transform: scale(0.8);
+        }
+        50% {
+          opacity: 1;
+          transform: scale(1);
+        }
+      }
+    </style>
+    <div id="root">
+      <div id="boot-splash">
+        <div class="dots" aria-hidden="true">
+          <span></span><span></span><span></span>
+          <span></span><span></span><span></span>
+          <span></span><span></span><span></span>
+        </div>
+        <div>squeezeblocks</div>
+      </div>
+    </div>
     <script type="module" src="game.tsx"></script>
   </body>
 </html>

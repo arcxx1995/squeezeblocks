@@ -9,7 +9,7 @@ import {
   type LineOrientation,
 } from "../../shared/engine";
 import type { MoveRequest, OnlineGame } from "../../shared/online";
-import { writeStats } from "./stats";
+import { clearBooking, computeResultDeltas, writeStats } from "./stats";
 
 // Seat colors, matching the engine's local seeds and the old Firebase backend.
 const SEAT_COLORS = ["#C5B0F4", "#DCEEB1", "#F4ECD6", "#EFD4D4"];
@@ -46,6 +46,19 @@ const ACTIVE_KEY = "active-games";
 // no bots — i.e. genuinely joinable by a stranger. Powers "Find an opponent".
 const OPEN_KEY = "open-games";
 
+// Sorted-set of finished games, scored by when their post should be removed
+// (doneAt + CLEANUP_MS). The sweep prunes stale match posts so the sub isn't
+// littered with dead games. A rematch (reset in place) drops the game out of
+// here; the hub post is reset to a lobby instead of removed.
+const DONE_KEY = "done-games";
+// Grace after a game finishes before its post is removed. Knob.
+const CLEANUP_MS = 45 * 1000;
+
+// A lobby advertised for an opponent this long without filling is treated as
+// abandoned and its post cleared. Fights the "wait hours for an opponent" async
+// model, but keeps the feed clean. Knob.
+const ABANDONED_LOBBY_MS = 5 * 60 * 1000;
+
 export async function loadGame(postId: string): Promise<OnlineGame | null> {
   const raw = await redis.get(gameKey(postId));
   return raw ? (JSON.parse(raw) as OnlineGame) : null;
@@ -59,6 +72,35 @@ export async function purgeGame(postId: string): Promise<void> {
   await redis.del(gameKey(postId));
   await redis.zRem(OPEN_KEY, [postId]);
   await redis.zRem(ACTIVE_KEY, [postId]);
+  await redis.zRem(DONE_KEY, [postId]);
+  // Tombstone: a client still open on the just-deleted post will ping /init; the
+  // flag stops that from resurrecting a dormant game key. TTL past any lingering
+  // client, then it expires so the id can never be reused (Reddit ids are unique
+  // anyway).
+  await redis.set(deadKey(postId), "1");
+  await redis.expire(deadKey(postId), 3600);
+  await clearBooking(postId);
+}
+
+const deadKey = (postId: string): string => `dead:${postId}`;
+
+export async function isDeadPost(postId: string): Promise<boolean> {
+  return (await redis.get(deadKey(postId))) === "1";
+}
+
+// Finished-game posts whose 5-min grace has elapsed — the sweep removes them.
+export async function dueDonePosts(now = Date.now()): Promise<string[]> {
+  const rows = await redis.zRange(DONE_KEY, 0, now, { by: "score" });
+  return rows.map((r) => r.member);
+}
+
+// Lobbies advertised for an opponent but never filled within the grace window —
+// abandoned, so the sweep clears their posts. OPEN_KEY is scored by createdAt,
+// so anything with createdAt older than the cutoff is stale. The hub is never
+// advertised here (it starts at 0 seats), but the sweep guards it anyway.
+export async function dueAbandonedLobbies(now = Date.now()): Promise<string[]> {
+  const rows = await redis.zRange(OPEN_KEY, 0, now - ABANDONED_LOBBY_MS, { by: "score" });
+  return rows.map((r) => r.member);
 }
 
 // Nuke the matchmaking + active-sweep registries wholesale — a belt-and-braces
@@ -94,6 +136,20 @@ async function reconcileActive(game: OnlineGame, now: number): Promise<void> {
     dueAt = wantReminder ? reminderAt : game.state.turnDeadlineAt;
   }
   await redis.zAdd(ACTIVE_KEY, { member: game.postId, score: dueAt });
+}
+
+// Track finished games for post cleanup: a done game is queued for removal at
+// doneAt + CLEANUP_MS; anything else (reset to lobby/playing by a rematch) drops
+// out of the queue so its post survives.
+async function reconcileDone(game: OnlineGame, now: number): Promise<void> {
+  if (game.phase === "done") {
+    await redis.zAdd(DONE_KEY, {
+      member: game.postId,
+      score: (game.doneAt ?? now) + CLEANUP_MS,
+    });
+  } else {
+    await redis.zRem(DONE_KEY, [game.postId]);
+  }
 }
 
 // Keep the open-opponent list in sync on every write: list a lobby only while a
@@ -199,7 +255,13 @@ async function updateGame(
       if (raw) game = JSON.parse(raw) as OnlineGame;
       else if (opts.create) game = opts.create();
       else throw new Error("Game is not in play");
+      const prevPhase = game.phase;
       mutate(game);
+      // Stamp the moment of completion once, so the cleanup clock is anchored to
+      // when the game actually finished (not a later stats/no-op write).
+      if (game.phase === "done" && prevPhase !== "done" && !game.doneAt) {
+        game.doneAt = now;
+      }
     } catch (error) {
       await txn.unwatch();
       throw error;
@@ -212,6 +274,7 @@ async function updateGame(
     if (committed) {
       await reconcileActive(game, now);
       await reconcileOpen(game);
+      await reconcileDone(game, now);
       return game;
     }
   }
@@ -338,24 +401,46 @@ export async function joinGame(
   );
 }
 
-// Seed a freshly-created lobby as a rematch: host takes seat 0, the named
-// opponent's seat is reserved (invitedId), so `Find an opponent` skips it and
-// joinGame turns away anyone else. Play starts when the opponent joins.
-export async function seedRematch(
+// Rematch in place: reset a finished game to a fresh match with the SAME seats,
+// on the SAME post — both players stay put, no new post spawned. Idempotent: if
+// the other player already tapped rematch (phase back to playing), this is a
+// no-op that returns the running game.
+export async function resetToRematch(
   postId: string,
-  hostId: string,
-  hostName: string,
-  invitedId: string,
   now = Date.now(),
 ): Promise<OnlineGame> {
   return updateGame(
     postId,
     (game) => {
-      if (game.phase !== "lobby") return; // post already advanced — leave as-is
-      game.seats = [
-        { id: hostId, name: hostName, color: SEAT_COLORS[0]!, isBot: false },
-      ];
-      game.invitedId = invitedId;
+      if (game.phase === "playing") return; // the other tap already rematched
+      if (game.phase !== "done") {
+        throw new Error("Rematch is only available once the game is over");
+      }
+      if (game.seats.filter((s) => !s.isBot).length < 2) {
+        throw new Error("No human opponent to rematch");
+      }
+      startPlaying(game, now); // rebuild a fresh board from the existing seats
+      game.statsRecorded = false; // let the new game's result book
+      game.doneAt = undefined; // no longer finished → drops out of cleanup
+    },
+    { now },
+  );
+}
+
+// Reset a post to an empty, joinable lobby (used to keep the hub post alive
+// instead of removing it when a game finishes on it).
+export async function resetToLobby(
+  postId: string,
+  now = Date.now(),
+): Promise<OnlineGame> {
+  return updateGame(
+    postId,
+    (game) => {
+      game.phase = "lobby";
+      game.seats = [];
+      game.state = null;
+      game.doneAt = undefined;
+      game.statsRecorded = false;
     },
     { now },
   );
@@ -366,20 +451,44 @@ export async function seedRematch(
 // → double-count), so we claim the write under the lock via statsRecorded, then
 // write outside it. Best-effort like the turn DMs: a dropped write loses stats,
 // never the game.
-async function recordResultIfDone(game: OnlineGame, now: number): Promise<void> {
-  if (game.phase !== "done" || game.statsRecorded) return;
-  let claimed = false;
-  const fresh = await updateGame(
-    game.postId,
-    (g) => {
-      if (g.phase === "done" && !g.statsRecorded) {
-        g.statsRecorded = true;
-        claimed = true;
-      }
-    },
-    { now },
-  );
-  if (claimed) await writeStats(fresh);
+async function recordResultIfDone(game: OnlineGame, now: number): Promise<boolean> {
+  try {
+    if (game.phase !== "done" || !game.state) return true;
+    if (game.statsRecorded) return true;
+    let g = game;
+    // Freeze the ELO deltas once, from pre-game ratings, before any stat is
+    // applied — retries then reuse these exact numbers.
+    if (!g.resultDeltas) {
+      const deltas = await computeResultDeltas(g);
+      g = await updateGame(
+        g.postId,
+        (x) => {
+          if (!x.resultDeltas) x.resultDeltas = deltas;
+        },
+        { now },
+      );
+    }
+    // Book every human seat idempotently; mark recorded only when all are in.
+    const allBooked = await writeStats(g);
+    if (allBooked) {
+      await updateGame(g.postId, (x) => { x.statsRecorded = true; }, { now });
+    }
+    return allBooked;
+  } catch (error) {
+    console.error("record result failed, will retry:", error);
+    return false; // never throw — the completing move must still succeed
+  }
+}
+
+// Retry hook for the sweep: ensure a finished game's stats are fully booked.
+// Returns true once recorded (or nothing to record), false to retry next tick —
+// the cleanup holds the post until this is true, so a game is never purged with
+// unrecorded stats/ELO.
+export async function ensureStatsRecorded(postId: string, now = Date.now()): Promise<boolean> {
+  const game = await loadGame(postId);
+  if (!game || game.phase !== "done") return true;
+  if (game.statsRecorded) return true;
+  return recordResultIfDone(game, now);
 }
 
 export async function applyMove(

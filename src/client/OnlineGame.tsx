@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { connectRealtime, context, disconnectRealtime, navigateTo, showToast } from "@devvit/web/client";
 import {
   BOX_COLS,
@@ -8,7 +8,11 @@ import {
   submitLine,
 } from "../shared/engine";
 import type { GameChannelMessage, LeaderRow, OnlineView, UserStats } from "../shared/online";
-import { GameBoard } from "./board";
+// Phaser (~1 MB) lives in board.tsx — lazy-split it out of the main bundle so
+// the UI paints fast, and prefetch immediately so the board is ready by the
+// time a match starts.
+const boardModule = import("./board");
+const GameBoard = lazy(() => boardModule.then((m) => ({ default: m.GameBoard })));
 import { DailyChallenge } from "./DailyChallenge";
 import { LobbyBoardAnim } from "./LobbyBoardAnim";
 
@@ -72,11 +76,13 @@ async function callApi(path: string, body?: unknown): Promise<OnlineView> {
 
 function formatRemaining(ms: number): string {
   if (ms <= 0) return "now";
+  // Derive each unit straight from ms — chaining ceil (s→m→h) double-rounds, so
+  // 24h+1ms became 1441m → 25h. Independent ceils cap correctly.
   const s = Math.ceil(ms / 1000);
   if (s < 60) return `${s}s`;
-  const m = Math.ceil(s / 60);
+  const m = Math.ceil(ms / 60000);
   if (m < 60) return `${m}m`;
-  return `${Math.ceil(m / 60)}h`;
+  return `${Math.ceil(ms / 3600000)}h`;
 }
 
 export function OnlineGame() {
@@ -400,14 +406,13 @@ export function OnlineGame() {
     }
   };
 
+  // Rematch resets this same post to a fresh game — no navigation. The opponent,
+  // still on this post, flips in via the realtime broadcast.
   const rematch = async () => {
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch("/api/rematch", { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.message ?? "Could not start a rematch");
-      navigateTo(data.url as string);
+      applyView(await callApi("/api/rematch", {}));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not start a rematch");
     } finally {
@@ -533,51 +538,69 @@ export function OnlineGame() {
         </button>
 
         {!amSeated ? (
+          game.invitedId && game.invitedId !== me ? (
+            // A rematch reserved for someone else — joining would be rejected.
+            <p className="font-mono text-xs leading-snug text-white/60">
+              This is a rematch reserved for another player.
+            </p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {game.invitedId === me ? (
+                <p className="font-mono text-xs leading-snug text-[#DCEEB1]/80">
+                  You&apos;ve been challenged to a rematch.
+                </p>
+              ) : null}
+              <button
+                type="button"
+                disabled={pending || !me}
+                onClick={() => join(false)}
+                className="min-h-12 rounded-full py-2 bg-white px-6 text-base font-medium text-black transition hover:bg-[#F4ECD6] disabled:opacity-50"
+              >
+                {me ? "Join game" : "Sign in to Reddit to play"}
+              </button>
+              {/* A reserved rematch seat is for the named opponent only — no
+                  matchmaking or bots, which would hijack it. */}
+              {me && !game.invitedId ? (
+                <>
+                  <button
+                    type="button"
+                    disabled={pending}
+                    onClick={findOpponent}
+                    className="min-h-12 rounded-full py-2 border border-white/25 bg-[#111111] px-6 text-base font-medium text-white transition hover:border-white/50 disabled:opacity-50"
+                  >
+                    Find an opponent
+                  </button>
+                  <button
+                    type="button"
+                    disabled={pending}
+                    onClick={() => join(true)}
+                    className="min-h-12 rounded-full py-2 border border-white/25 bg-[#111111] px-6 text-base font-medium text-white transition hover:border-white/50 disabled:opacity-50"
+                  >
+                    Play vs bots
+                  </button>
+                </>
+              ) : null}
+            </div>
+          )
+        ) : (
           <div className="flex flex-col gap-2">
-            <button
-              type="button"
-              disabled={pending || !me}
-              onClick={() => join(false)}
-              className="min-h-12 rounded-full py-2 bg-white px-6 text-base font-medium text-black transition hover:bg-[#F4ECD6] disabled:opacity-50"
-            >
-              {me ? "Join game" : "Sign in to Reddit to play"}
-            </button>
-            {me ? (
-              <>
+            <p className="font-mono text-xs leading-snug text-[#DCEEB1]/80">
+              {game.invitedId
+                ? "Waiting for your rematch opponent to join."
+                : "You're in — share this post for the other seat, or hop into a game already waiting."}
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              {/* No stranger matchmaking while a rematch seat is reserved. */}
+              {!game.invitedId ? (
                 <button
                   type="button"
                   disabled={pending}
                   onClick={findOpponent}
-                  className="min-h-12 rounded-full py-2 border border-white/25 bg-[#111111] px-6 text-base font-medium text-white transition hover:border-white/50 disabled:opacity-50"
+                  className="min-h-11 rounded-full py-2 bg-white px-4 text-sm font-medium text-black transition hover:bg-[#F4ECD6] disabled:opacity-50"
                 >
                   Find an opponent
                 </button>
-                <button
-                  type="button"
-                  disabled={pending}
-                  onClick={() => join(true)}
-                  className="min-h-12 rounded-full py-2 border border-white/25 bg-[#111111] px-6 text-base font-medium text-white transition hover:border-white/50 disabled:opacity-50"
-                >
-                  Play vs bots
-                </button>
-              </>
-            ) : null}
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            <p className="font-mono text-xs leading-snug text-[#DCEEB1]/80">
-              You&apos;re in — share this post for the other seat, or hop into a
-              game already waiting.
-            </p>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                disabled={pending}
-                onClick={findOpponent}
-                className="min-h-11 rounded-full py-2 bg-white px-4 text-sm font-medium text-black transition hover:bg-[#F4ECD6] disabled:opacity-50"
-              >
-                Find an opponent
-              </button>
+              ) : null}
               <button
                 type="button"
                 disabled={pending}
@@ -603,10 +626,20 @@ export function OnlineGame() {
   const capturedBoxes = Object.values(state.boxes).filter(
     (box) => box.ownerPlayerId,
   ).length;
-  const remainingMs = state.turnDeadlineAt - now;
+  // Cap at the turn window (deadline − start): if our clock lags the server the
+  // raw deadline−now can read above the full window and show "25h". Clamped, it
+  // never exceeds the real turn length. Still goes negative once expired so skip
+  // can trigger.
+  const remainingMs = Math.min(
+    state.turnDeadlineAt - now,
+    state.turnDeadlineAt - state.turnStartedAt,
+  );
   // Only seated players may trigger the skip — the server rejects spectators,
   // so don't show them a button that can only error.
-  const canSkip = game.phase === "playing" && remainingMs <= 0 && amSeated;
+  // Only offer skip on your OWN expired turn — never a "nudge the opponent"
+  // button, which would reveal it isn't your turn. The scheduler sweep advances
+  // an opponent's expired turn on its own.
+  const canSkip = game.phase === "playing" && remainingMs <= 0 && amSeated && isMyTurn;
   const canResign = game.phase === "playing" && amSeated;
   const winners = state.players.filter((player) =>
     state.winnerPlayerIds.includes(player.id),
@@ -660,15 +693,19 @@ export function OnlineGame() {
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="truncate text-xl font-bold leading-snug">
-                {isMyTurn ? "Your turn" : `${activePlayer?.name}'s turn`}
+                {isMyTurn ? "Your turn" : "Match in progress"}
               </p>
               <p className="font-mono text-xs uppercase tracking-[0.12em] text-black/65">
                 {capturedBoxes} of {TOTAL_BOXES} boxes captured
               </p>
             </div>
-            <div className="grid size-14 place-items-center rounded-full border-4 border-white bg-black font-mono text-sm font-normal text-white">
-              {formatRemaining(remainingMs)}
-            </div>
+            {/* Countdown only on your own turn — a ticking clock on someone
+                else's turn signals "not your turn". */}
+            {isMyTurn ? (
+              <div className="grid size-14 place-items-center rounded-full border-4 border-white bg-black font-mono text-sm font-normal text-white">
+                {formatRemaining(remainingMs)}
+              </div>
+            ) : null}
           </div>
         </section>
       ) : null}
@@ -723,13 +760,15 @@ export function OnlineGame() {
               keeps the turn, and blocking on the in-flight send would drop fast
               chained taps. isMyTurn flips false optimistically after a
               turn-ending move, so off-turn input is still blocked. */}
-          <GameBoard
-            game={state}
-            lastMoveId={lastMoveId}
-            onDrawLine={drawLine}
-            interactive={isMyTurn && hiddenLineIds.size === 0}
-            hiddenLineIds={hiddenLineIds}
-          />
+          <Suspense fallback={<div className="mx-auto aspect-square h-full max-h-full w-auto max-w-full" />}>
+            <GameBoard
+              game={state}
+              lastMoveId={lastMoveId}
+              onDrawLine={drawLine}
+              interactive={isMyTurn && hiddenLineIds.size === 0}
+              hiddenLineIds={hiddenLineIds}
+            />
+          </Suspense>
         </section>
       ) : null}
 
@@ -746,7 +785,7 @@ export function OnlineGame() {
             onClick={skip}
             className="min-h-11 rounded-full py-2 border border-white/25 bg-[#111111] px-5 text-sm font-medium text-white transition hover:border-white/50 disabled:opacity-50"
           >
-            {isMyTurn ? "Turn expired — skip" : `Nudge ${activePlayer?.name} — turn expired`}
+            Turn expired — skip
           </button>
         </div>
       ) : null}

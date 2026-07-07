@@ -21,6 +21,9 @@ export type OnlineGame = {
   reminderSentAt?: number; // state.turnStartedAt we've DMed a pre-expiry reminder for
   statsRecorded?: boolean; // set once the finished game's result is booked to stats
   invitedId?: string; // rematch: the only stranger allowed to take the open seat
+  doneAt?: number; // when the game finished (phase → done); drives the 5-min post cleanup
+  resultDeltas?: Record<string, number>; // ELO deltas frozen at completion (from pre-game
+  // ratings) so a stats-write retry can't recompute off already-updated ratings
 };
 
 // Per-user retention record, keyed by Reddit username. The streak (and the fear

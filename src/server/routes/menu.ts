@@ -1,27 +1,20 @@
 import { Hono } from 'hono';
 import type { UiResponse } from '@devvit/web/shared';
 import { context } from '@devvit/web/server';
-import { createDailyPost, createPost, deleteAllPosts, isPostLive, postCommentUrl } from '../core/post';
+import { createDailyPost, createOrReuseMainPost, deleteAllPosts, isPostLive, postCommentUrl } from '../core/post';
 import { getDailyPostId, today } from '../core/daily';
 
 export const menu = new Hono();
 
 menu.post('/post-create', async (c) => {
   try {
-    const post = await createPost();
-    // Mod-created post is the main app post — pin it to the top (slot 1) so it
-    // sits above the daily. This is the re-pin lever: a same-version reinstall
-    // no-ops (won't re-fire onAppInstall), so the menu is the only way to
-    // re-establish the top pin. Best-effort: needs mod, must not fail the post.
-    try {
-      await post.sticky(1);
-    } catch (error) {
-      console.error('post-create sticky failed:', error);
-    }
-
+    // Reuse the single community-highlights hub (pinned to slot 1) if it's still
+    // live; only make a fresh one when there isn't one. Repeat taps never spawn
+    // duplicate hub posts. Also the re-pin lever if the pin was ever lost.
+    const postId = await createOrReuseMainPost();
     return c.json<UiResponse>(
       {
-        navigateTo: postCommentUrl(post.id, context.subredditName),
+        navigateTo: postCommentUrl(postId, context.subredditName),
       },
       200
     );

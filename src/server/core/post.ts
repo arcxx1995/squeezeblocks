@@ -1,12 +1,16 @@
 import { reddit, context, redis } from '@devvit/web/server';
 import { clearRegistries, createGame, purgeGame } from './game';
-import { forgetDailyPost, markDailyPost, setDailyPostId, today } from './daily';
+import { forgetDailyPost, getDailyPostId, markDailyPost, setDailyPostId, today } from './daily';
 
 // Set once the first install seeds the main + daily posts; the install trigger
 // no-ops while it's present so playtest reloads (which re-fire onAppInstall)
 // don't nuke and recreate everything. delete-all clears it so a deliberate reset
 // re-seeds on the next install.
 export const SETUP_KEY = 'app-setup-done';
+
+// The single community-highlights hub post. Tracked so we never spawn a second
+// one — the sub should hold exactly one hub (pinned) plus the daily posts.
+const MAIN_POST_KEY = 'main-post-id';
 
 // Reddit thing-ids (post.id, context.postId) are `t3_`-prefixed; comment URLs
 // need the bare id. Single source of truth for the strip — three call sites
@@ -30,6 +34,36 @@ export const isPostLive = async (postId: string): Promise<boolean> => {
   }
 };
 
+// The tracked community-highlights hub id, if any — so cleanup never removes it.
+export const getMainPostId = async (): Promise<string | null> =>
+  (await redis.get(MAIN_POST_KEY)) ?? null;
+
+// Delete a finished/abandoned match post. The app authored these, so delete()
+// (author-delete) leaves no mod-queue residue — cleaner than a mod remove();
+// falls back to remove() if delete isn't permitted. Returns true when the post is
+// gone (or already gone) so the caller can safely purge its tracking; false on a
+// real failure, so the post stays queued and is retried instead of orphaned.
+export const removePost = async (postId: string): Promise<boolean> => {
+  let post;
+  try {
+    post = await reddit.getPostById(`t3_${postId.replace(/^t3_/, '')}`);
+  } catch {
+    return true; // can't fetch it → already gone
+  }
+  try {
+    await post.delete();
+    return true;
+  } catch {
+    try {
+      await post.remove(false);
+      return true;
+    } catch (error) {
+      console.error('remove finished post failed:', error);
+      return false;
+    }
+  }
+};
+
 export const createPost = async () => {
   const post = await reddit.submitCustomPost({
     title: 'squeezeblocks',
@@ -45,6 +79,32 @@ export const createPost = async () => {
   // Seed the lobby so the first visitors can join immediately.
   await createGame(post.id);
   return post;
+};
+
+// Pin a post to slot 1 (the community-highlights hub). Best-effort: needs mod.
+const pinPost = async (postId: string): Promise<void> => {
+  try {
+    const post = await reddit.getPostById(`t3_${postId.replace(/^t3_/, '')}`);
+    await post.sticky(1);
+  } catch (error) {
+    console.error('hub pin failed:', error);
+  }
+};
+
+// The one community-highlights hub post, always pinned to slot 1. Reuses the
+// tracked one while it's still live (repeat taps / installs never litter the sub
+// with duplicates); makes a fresh one only when there isn't one. Re-pins every
+// call, so a hub that lost its slot is restored. Returns its id.
+export const createOrReuseMainPost = async (): Promise<string> => {
+  const existing = await redis.get(MAIN_POST_KEY);
+  if (existing && (await isPostLive(existing))) {
+    await pinPost(existing); // re-assert the pin in case it was lost
+    return existing;
+  }
+  const post = await createPost();
+  await pinPost(post.id);
+  await redis.set(MAIN_POST_KEY, post.id);
+  return post.id;
 };
 
 // Nukes every post in the subreddit — for the app's dedicated test sub where
@@ -68,8 +128,9 @@ export const deleteAllPosts = async (): Promise<number> => {
   await clearRegistries();
   // The tracked daily just got removed — forget it so the menu makes a fresh one.
   await forgetDailyPost();
-  // Reset the install guard so the next install re-seeds the main + daily posts.
+  // Reset the install guard + forget the hub so the next install re-seeds them.
   await redis.del(SETUP_KEY);
+  await redis.del(MAIN_POST_KEY);
   return posts.length;
 };
 
@@ -94,4 +155,12 @@ export const createDailyPost = async (date?: string) => {
     console.error('daily post approve failed:', error);
   }
   return post;
+};
+
+// Guarantee today's daily exists and is live — creates it if missing/removed.
+// Idempotent, so the sweep can call it every tick to self-heal a deleted daily.
+export const ensureTodayDaily = async (): Promise<void> => {
+  const existing = await getDailyPostId();
+  if (existing && (await isPostLive(existing))) return;
+  await createDailyPost(today());
 };

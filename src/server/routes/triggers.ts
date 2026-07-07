@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import type { OnAppInstallRequest, TriggerResponse } from '@devvit/web/shared';
 import { context, redis } from '@devvit/web/server';
-import { createDailyPost, createPost, SETUP_KEY } from '../core/post';
+import { createDailyPost, createOrReuseMainPost, SETUP_KEY } from '../core/post';
 
 export const triggers = new Hono();
 
@@ -21,15 +21,9 @@ triggers.post('/on-app-install', async (c) => {
     }
     await redis.set(SETUP_KEY, '1');
 
-    const post = await createPost();
-    // Pin the main app post to the top (slot 1). Daily posts are not stickied,
-    // so they land in the normal feed below it. Best-effort: needs mod, must not
-    // fail the install.
-    try {
-      await post.sticky(1);
-    } catch (error) {
-      console.error('welcome post sticky failed:', error);
-    }
+    // The single community-highlights hub, pinned to slot 1. Daily posts are not
+    // stickied, so they land in the normal feed below it.
+    const mainPostId = await createOrReuseMainPost();
     // Also stand up the daily-challenge post. Best-effort: a failure here
     // must not fail the install (the mod menu can create it later).
     try {
@@ -41,7 +35,7 @@ triggers.post('/on-app-install', async (c) => {
     return c.json<TriggerResponse>(
       {
         status: 'success',
-        message: `Post created in subreddit ${context.subredditName} with id ${post.id} (trigger: ${input.type})`,
+        message: `Hub post ${mainPostId} in ${context.subredditName} (trigger: ${input.type})`,
       },
       200
     );

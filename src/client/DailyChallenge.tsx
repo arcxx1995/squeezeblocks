@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import {
   createInitialGame,
   lineId,
@@ -8,7 +8,9 @@ import {
 } from "../shared/engine";
 import { botMove } from "../shared/bot";
 import { BOT_LEVELS, type BotLevel, type DailyView, type MoveRequest } from "../shared/online";
-import { GameBoard } from "./board";
+// Same lazy split as OnlineGame — a static import here would drag Phaser back
+// into the main bundle.
+const GameBoard = lazy(() => import("./board").then((m) => ({ default: m.GameBoard })));
 
 // Build the day's starting game: seat 0 = you (starts), seat 1 = the bot. Same
 // shape the server replays, so a finished run scores identically there.
@@ -25,10 +27,10 @@ function freshDaily(): GameState {
 
 const BOT_STEP_MS = 350;
 
-const LEVEL_META: Record<BotLevel, { name: string; blurb: string }> = {
-  1: { name: "Easy", blurb: "greedy — gives boxes away" },
-  2: { name: "Medium", blurb: "plays it safe" },
-  3: { name: "Hard", blurb: "chain master" },
+const LEVEL_META: Record<BotLevel, { name: string }> = {
+  1: { name: "Easy" },
+  2: { name: "Medium" },
+  3: { name: "Hard" },
 };
 
 export function DailyChallenge({ onExit }: { onExit?: () => void }) {
@@ -175,8 +177,9 @@ export function DailyChallenge({ onExit }: { onExit?: () => void }) {
           </p>
         ) : null}
 
-        {/* Level picker: pick your bot. Played levels show your margin. */}
-        {info ? (
+        {/* Level picker: pick your bot. Played levels show your margin. Hidden
+            once a match is live so the board gets the full screen. */}
+        {info && !(state && !played) ? (
           <section className="mt-3 grid grid-cols-3 gap-2">
             {BOT_LEVELS.map((lvl) => {
               const lv = info.levels.find((l) => l.level === lvl);
@@ -195,9 +198,6 @@ export function DailyChallenge({ onExit }: { onExit?: () => void }) {
                   }`}
                 >
                   <span className="text-sm font-extrabold text-white">{LEVEL_META[lvl].name}</span>
-                  <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-white/45">
-                    {LEVEL_META[lvl].blurb}
-                  </span>
                   <span
                     className={`font-mono text-xs ${res ? "text-[#DCEEB1]" : "text-white/60"}`}
                   >
@@ -267,18 +267,20 @@ export function DailyChallenge({ onExit }: { onExit?: () => void }) {
               ))}
             </section>
             <section className="flex min-h-0 flex-1 items-center justify-center py-4">
-              <GameBoard
-                game={state}
-                lastMoveId={lastMoveId}
-                onDrawLine={onDrawLine}
-                interactive={
-                  state.status === "active" &&
-                  state.players[state.currentPlayerIndex]!.id === "you" &&
-                  !botThinking &&
-                  !submitting
-                }
-                hiddenLineIds={new Set()}
-              />
+              <Suspense fallback={<div className="mx-auto aspect-square h-full max-h-full w-auto max-w-full" />}>
+                <GameBoard
+                  game={state}
+                  lastMoveId={lastMoveId}
+                  onDrawLine={onDrawLine}
+                  interactive={
+                    state.status === "active" &&
+                    state.players[state.currentPlayerIndex]!.id === "you" &&
+                    !botThinking &&
+                    !submitting
+                  }
+                  hiddenLineIds={new Set()}
+                />
+              </Suspense>
             </section>
           </>
         ) : level == null ? (

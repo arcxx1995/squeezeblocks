@@ -10,11 +10,11 @@ import {
   type OnlineGame,
   type OnlineView,
 } from '../../shared/online';
-import { applyBotMove, applyMove, applyResign, applySkip, createGame, findOpenGame, joinGame, loadGame, rememberPendingPost, reusablePendingPost, seedRematch } from '../core/game';
+import { applyBotMove, applyMove, applyResign, applySkip, createGame, findOpenGame, isDeadPost, joinGame, loadGame, rememberPendingPost, resetToRematch, reusablePendingPost } from '../core/game';
 import { getStats, topLeaderboard } from '../core/stats';
 import { dailyView, isDailyPost, isPlayableDailyDate, playedSummary, recordDaily, today } from '../core/daily';
 import { createPost, isPostLive, postCommentUrl } from '../core/post';
-import { broadcast, notifyNextTurn, notifyRematchInvite, notifyResignWin } from '../core/notify';
+import { broadcast, notifyNextTurn, notifyResignWin } from '../core/notify';
 
 export const api = new Hono();
 
@@ -58,7 +58,17 @@ api.post('/new-game', async (c) => {
       }
     }
     const post = await createPost();
-    if (username) await rememberPendingPost(username, post.id);
+    // Seat the creator so they land in a lobby they're already in (like rematch),
+    // ready to share or "Find an opponent" — not an empty one that reads as "New
+    // match did nothing". Also advertises it for matchmaking. Best-effort.
+    if (username) {
+      try {
+        await joinGame(post.id, username);
+      } catch (error) {
+        console.error('seat creator on new game failed:', error);
+      }
+      await rememberPendingPost(username, post.id);
+    }
     return c.json<{ url: string }>({ url: postCommentUrl(post.id, context.subredditName) });
   } catch (error) {
     return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
@@ -82,6 +92,21 @@ api.post('/find-open', async (c) => {
     // apart (finder navigates away, host stranded). Joining here is seamless: no
     // navigate, and it pairs the two people actually looking at each other.
     const here = await loadGame(postId);
+    // Already waiting in a reserved rematch lobby (you're seated, a seat is held
+    // for your named opponent)? Stay put — don't get yanked to some stranger's
+    // post and strand the rematch. Just re-show this lobby.
+    if (
+      here &&
+      here.phase === 'lobby' &&
+      here.invitedId &&
+      here.seats.length < here.playerCount &&
+      here.seats.some((s) => s.id === username)
+    ) {
+      return c.json<{ url: string | null; view: OnlineView }>({
+        url: null,
+        view: await view(here),
+      });
+    }
     const joinableHere =
       here &&
       here.phase === 'lobby' &&
@@ -137,7 +162,13 @@ api.post('/find-open', async (c) => {
 api.get('/init', async (c) => {
   try {
     const postId = requirePostId();
-    const game = (await loadGame(postId)) ?? (await createGame(postId));
+    const loaded = await loadGame(postId);
+    // A cleaned-up post is dead — don't resurrect a dormant game key for a client
+    // still pinging the deleted post.
+    if (!loaded && (await isDeadPost(postId))) {
+      throw new Error('This game has ended.');
+    }
+    const game = loaded ?? (await createGame(postId));
     const v = await view(game);
     return c.json<OnlineView>(
       (await isDailyPost(postId)) ? { ...v, dailyPost: true } : v,
@@ -250,27 +281,19 @@ api.post('/resign', async (c) => {
   }
 });
 
-// Rematch: spin up a fresh post with the caller seated and the opponent's seat
-// reserved, then DM them the link. The loop back to the same person.
+// Rematch: reset THIS post's finished game to a fresh match with the same two
+// players — both stay on the same post, no new post. Either player can tap it;
+// the second tap is a harmless no-op that just returns the running game. The
+// opponent (already on the post) flips into the new game via the broadcast.
 api.post('/rematch', async (c) => {
   try {
     const postId = requirePostId();
     const username = await reddit.getCurrentUsername();
     if (!username) throw new Error('You must be signed in to Reddit');
-    const game = await loadGame(postId);
-    if (!game || game.phase !== 'done') {
-      throw new Error('Rematch is only available once the game is over');
-    }
-    const meSeat = game.seats.find((s) => s.id === username && !s.isBot);
-    if (!meSeat) throw new Error('Only a player in this game can offer a rematch');
-    const opponent = game.seats.find((s) => s.id !== username && !s.isBot);
-    if (!opponent) throw new Error('No human opponent to rematch');
-
-    const post = await createPost();
-    await seedRematch(post.id, username, meSeat.name, opponent.id);
-    const url = postCommentUrl(post.id, context.subredditName);
-    void notifyRematchInvite(opponent.id, meSeat.name, url);
-    return c.json<{ url: string }>({ url });
+    const game = await resetToRematch(postId);
+    if (game.phase === 'playing') void notifyNextTurn(game, '');
+    await broadcast(game);
+    return c.json<OnlineView>(await view(game));
   } catch (error) {
     return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
   }

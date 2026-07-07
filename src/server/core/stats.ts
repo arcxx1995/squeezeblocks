@@ -61,28 +61,61 @@ async function applyResult(
   return null;
 }
 
-// Book a finished game's result for its human seats (bots skipped). Best-effort,
-// called after the game-key CAS commits — never inside the mutator, which
-// re-runs on retry and would double-count. Idempotency is the caller's job (the
-// statsRecorded claim in game.ts).
+const bookedKey = (postId: string): string => `booked:${postId}`;
+const BOOKED_TTL = 24 * 60 * 60;
+
+// ELO deltas for a finished game, from the players' pre-game ratings. Frozen onto
+// the game at completion (game.resultDeltas) so a retry applies the SAME numbers
+// instead of recomputing off ratings a partial write already moved.
+export async function computeResultDeltas(game: OnlineGame): Promise<Record<string, number>> {
+  const state = game.state;
+  if (!state) return {};
+  const humans = game.seats.filter((s) => !s.isBot);
+  return Object.fromEntries(await ratingDeltas(state, humans));
+}
+
+// Book a finished game's result for its human seats (bots skipped). Idempotent
+// and retry-safe: each seat's stats/ELO write is claimed atomically (hSetNX), so
+// re-running never double-counts a seat already booked; a claim whose write fails
+// is released so the next attempt retries it. Leaderboard + flair are refreshed
+// every pass (both idempotent), so a flair that failed once self-heals on retry.
+// Returns true only when every human seat is booked. Uses the frozen deltas.
 // ponytail: 25 boxes is odd, so a 2-player game can't tie — winnerPlayerIds is a
 // single id. A multi-winner draw (only possible at 3–4 seats) counts as a win
 // for everyone tied; fine for a streak toy.
-export async function writeStats(game: OnlineGame): Promise<void> {
+export async function writeStats(game: OnlineGame): Promise<boolean> {
   const state = game.state;
-  if (!state || state.status !== "completed") return;
+  if (!state || state.status !== "completed") return true;
   const winners = new Set(state.winnerPlayerIds);
   const humans = game.seats.filter((s) => !s.isBot);
-  const deltas = await ratingDeltas(state, humans);
+  const deltas = game.resultDeltas ?? {};
+  const key = bookedKey(game.postId);
+  let allBooked = true;
   for (const seat of humans) {
     const won = winners.has(seat.id);
-    const wins = await applyResult(seat.id, won, deltas.get(seat.id) ?? 0);
-    // Leaderboard + flair mirror all-time wins, so only touch them on a win.
-    if (won && wins !== null) {
+    const claimed = (await redis.hSetNX(key, seat.id, "1")) === 1;
+    if (claimed) {
+      const wins = await applyResult(seat.id, won, deltas[seat.id] ?? 0);
+      if (wins === null) {
+        await redis.hDel(key, [seat.id]); // release → retried next pass
+        allBooked = false;
+        continue;
+      }
+    }
+    // Idempotent mirrors — refreshed each pass so an earlier flair failure heals.
+    if (won) {
+      const wins = (await getStats(seat.id)).wins;
       await redis.zAdd(LEADERBOARD_KEY, { member: seat.id, score: wins });
       await setWinsFlair(seat.id, wins);
     }
   }
+  await redis.expire(key, BOOKED_TTL);
+  return allBooked;
+}
+
+// Drop a game's per-seat booking hash (called by purgeGame on cleanup).
+export async function clearBooking(postId: string): Promise<void> {
+  await redis.del(bookedKey(postId));
 }
 
 // Pairwise ELO across all human seats, scored by box count so the margin among
