@@ -14,19 +14,21 @@ startButton.addEventListener('click', (e) => {
 });
 
 // Personalize the headline when we know who's viewing. Daily-challenge posts
-// get their own copy — resolved async so the splash still paints instantly. If
-// the viewer already played today's daily, the card shows their score instead
-// of inviting a replay.
+// get their own copy. The final text is applied in ONE update after /api/splash
+// resolves — an eager sync rename here made the card visibly change copy two or
+// three times on every feed load. Until then the static HTML copy stands.
 const titleElement = document.getElementById('title');
 const descriptionElement = document.getElementById('description');
 type Played = { you: number; bot: number; margin: number };
 if (titleElement && context.username) {
   const name = context.username;
-  titleElement.textContent = `Your move, ${name}`;
   void fetch('/api/splash')
     .then((r) => (r.ok ? r.json() : null))
     .then((data: { daily?: boolean; played?: Played | null; allDone?: boolean } | null) => {
-      if (!data?.daily) return;
+      if (!data?.daily) {
+        titleElement.textContent = `Your move, ${name}`;
+        return;
+      }
       // "Done" only once all three levels are cleared; a best-so-far result still
       // shows on the card while levels remain.
       if (data.allDone && data.played) {
