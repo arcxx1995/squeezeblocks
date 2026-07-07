@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+/* font-mono utilities must resolve to Geist Pixel too — Tailwind's default
+   mono stack was overriding the app font on every font-mono element. */
+@theme {
+  --font-mono: "Geist Pixel", ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+}
+
 @font-face {
   font-family: "Geist Pixel";
   src: url("/assets/GeistPixel-Square.woff2") format("woff2");
