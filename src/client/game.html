@@ -11,6 +11,12 @@
     <!-- Inline boot splash: visible instantly, replaced when React mounts.
          Styles are inline so it renders even before game.css arrives. -->
     <style>
+      @font-face {
+        font-family: "Geist Pixel";
+        src: url("/assets/GeistPixel-Square.woff2") format("woff2");
+        font-weight: 100 900;
+        font-display: swap;
+      }
       #boot-splash {
         height: 100dvh;
         display: flex;
@@ -20,7 +26,7 @@
         gap: 1.25rem;
         background: #000;
         color: #fff;
-        font-family: ui-monospace, "SF Mono", "Cascadia Mono", monospace;
+        font-family: "Geist Pixel", ui-monospace, "SF Mono", "Cascadia Mono", monospace;
         letter-spacing: 0.08em;
       }
       #boot-splash .dots {
