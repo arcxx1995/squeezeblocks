@@ -487,15 +487,25 @@ export function OnlineGame() {
   }
 
   if (!view) {
-    // No how-to overlay during load — we don't yet know if this is a daily
-    // (result) post, and flashing the card over "See result" is jarring. The
-    // help still shows on the resolved lobby/playing/done screens below.
+    if (error) {
+      return (
+        <Shell>
+          <p className="font-mono text-sm text-white/60">{error}</p>
+        </Shell>
+      );
+    }
+    // Re-render the game.html boot splash while /api/init loads — its inline
+    // CSS sits outside #root and survives the React mount, so this is
+    // pixel-identical: one continuous splash from first paint to first view.
     return (
-      <Shell>
-        <p className="font-mono text-sm text-white/60">
-          {error ?? "Loading game…"}
-        </p>
-      </Shell>
+      <div id="boot-splash">
+        <div className="dots" aria-hidden="true">
+          <span></span><span></span><span></span>
+          <span></span><span></span><span></span>
+          <span></span><span></span><span></span>
+        </div>
+        <div>squeezeblocks</div>
+      </div>
     );
   }
 
