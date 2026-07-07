@@ -75,6 +75,7 @@ export type OnlineView = {
   myStats?: UserStats; // the viewer's own record (absent when signed out)
   leaderboard?: LeaderRow[]; // top players by all-time wins in this subreddit
   dailyPost?: boolean; // this post is a daily challenge, not a match
+  daily?: DailyView; // bundled on /init for daily posts — saves the client a second roundtrip
 };
 
 export type MoveRequest = {

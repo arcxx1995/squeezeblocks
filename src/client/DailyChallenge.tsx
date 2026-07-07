@@ -36,8 +36,14 @@ const LEVEL_META: Record<BotLevel, { name: string }> = {
   3: { name: "Hard" },
 };
 
-export function DailyChallenge({ onExit }: { onExit?: () => void }) {
-  const [info, setInfo] = useState<DailyView | null>(null);
+export function DailyChallenge({
+  onExit,
+  initial,
+}: {
+  onExit?: () => void;
+  initial?: DailyView | null;
+}) {
+  const [info, setInfo] = useState<DailyView | null>(initial ?? null);
   const [error, setError] = useState<string | null>(null);
   const [level, setLevel] = useState<BotLevel | null>(null);
   const [state, setState] = useState<GameState | null>(null);
@@ -50,8 +56,10 @@ export function DailyChallenge({ onExit }: { onExit?: () => void }) {
   // game that crosses midnight is still scored against the day it was played.
   const dateRef = useRef<string>("");
 
-  // Load today's challenge (all three levels' status + boards).
+  // Load today's challenge (all three levels' status + boards) — skipped when
+  // /api/init already bundled it (daily posts), which kills the late pop-in.
   useEffect(() => {
+    if (initial) return;
     void (async () => {
       try {
         const res = await fetch("/api/daily");
@@ -62,8 +70,8 @@ export function DailyChallenge({ onExit }: { onExit?: () => void }) {
         setError(err instanceof Error ? err.message : "Could not load the daily");
       }
     })();
-    return () => timersRef.current.forEach((t) => window.clearTimeout(t));
-  }, []);
+  }, [initial]);
+  useEffect(() => () => timersRef.current.forEach((t) => window.clearTimeout(t)), []);
 
   const submitRun = useCallback(async (moves: MoveRequest[], lvl: BotLevel) => {
     setSubmitting(true);
@@ -181,11 +189,12 @@ export function DailyChallenge({ onExit }: { onExit?: () => void }) {
         ) : null}
 
         {/* Level picker: pick your bot. Played levels show your margin. Hidden
-            once a match is live so the board gets the full screen. */}
-        {info && !(state && !played) ? (
+            once a match is live so the board gets the full screen. Rendered
+            before `info` arrives (disabled) so the buttons don't pop in late. */}
+        {!(state && !played) ? (
           <section className="mt-3 grid grid-cols-3 gap-2">
             {BOT_LEVELS.map((lvl) => {
-              const lv = info.levels.find((l) => l.level === lvl);
+              const lv = info?.levels.find((l) => l.level === lvl);
               const res = lv?.played ?? null;
               const selected = lvl === level;
               return (
@@ -193,7 +202,7 @@ export function DailyChallenge({ onExit }: { onExit?: () => void }) {
                   key={lvl}
                   type="button"
                   onClick={() => selectLevel(lvl)}
-                  disabled={botThinking || submitting}
+                  disabled={!info || botThinking || submitting}
                   className={`flex flex-col gap-1 rounded-lg border p-3 text-left transition disabled:opacity-60 ${
                     selected
                       ? "border-[#DCEEB1] bg-[#111111]"
@@ -204,7 +213,7 @@ export function DailyChallenge({ onExit }: { onExit?: () => void }) {
                   <span
                     className={`font-mono text-xs ${res ? "text-[#DCEEB1]" : "text-white/60"}`}
                   >
-                    {res ? (res.margin > 0 ? `+${res.margin}` : res.margin) : "Play →"}
+                    {res ? (res.margin > 0 ? `+${res.margin}` : res.margin) : info ? "Play →" : "…"}
                   </span>
                 </button>
               );

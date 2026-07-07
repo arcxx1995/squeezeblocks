@@ -169,9 +169,12 @@ api.get('/init', async (c) => {
       throw new Error('This game has ended.');
     }
     const game = loaded ?? (await createGame(postId));
-    const v = await view(game);
+    const [v, daily] = await Promise.all([view(game), isDailyPost(postId)]);
+    // Bundle the daily view for daily posts — the client otherwise pays a
+    // second full roundtrip (incl. another getCurrentUsername) after first
+    // paint, which showed up as the level picker loading late.
     return c.json<OnlineView>(
-      (await isDailyPost(postId)) ? { ...v, dailyPost: true } : v,
+      daily ? { ...v, dailyPost: true, daily: await dailyView(v.me) } : v,
     );
   } catch (error) {
     return c.json<ApiError>({ status: 'error', message: message(error) }, 400);

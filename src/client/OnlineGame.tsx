@@ -479,11 +479,11 @@ export function OnlineGame() {
   // The pinned daily post has no match — it opens straight into the daily, with
   // no way back to a lobby (there isn't one).
   if (view?.dailyPost) {
-    return <DailyChallenge />;
+    return <DailyChallenge initial={view.daily ?? null} />;
   }
 
   if (screen === "daily") {
-    return <DailyChallenge onExit={() => setScreen("game")} />;
+    return <DailyChallenge initial={view?.daily ?? null} onExit={() => setScreen("game")} />;
   }
 
   if (!view) {
