@@ -1,6 +1,12 @@
-import { reddit, context } from '@devvit/web/server';
+import { reddit, context, redis } from '@devvit/web/server';
 import { clearRegistries, createGame, purgeGame } from './game';
 import { forgetDailyPost, markDailyPost, setDailyPostId, today } from './daily';
+
+// Set once the first install seeds the main + daily posts; the install trigger
+// no-ops while it's present so playtest reloads (which re-fire onAppInstall)
+// don't nuke and recreate everything. delete-all clears it so a deliberate reset
+// re-seeds on the next install.
+export const SETUP_KEY = 'app-setup-done';
 
 // Reddit thing-ids (post.id, context.postId) are `t3_`-prefixed; comment URLs
 // need the bare id. Single source of truth for the strip — three call sites
@@ -12,10 +18,30 @@ export const postCommentUrl = (id: string, subredditName?: string): string => {
     : `https://www.reddit.com/comments/${bare}`;
 };
 
+// Whether a post still exists and isn't removed/spammed — so reuse paths (a
+// pending lobby, today's tracked daily) never navigate a user to a post that was
+// removed, which renders as "removed by moderator". Missing post → not live.
+export const isPostLive = async (postId: string): Promise<boolean> => {
+  try {
+    const post = await reddit.getPostById(`t3_${postId.replace(/^t3_/, '')}`);
+    return !post.isRemoved() && !post.spam;
+  } catch {
+    return false;
+  }
+};
+
 export const createPost = async () => {
   const post = await reddit.submitCustomPost({
     title: 'squeezeblocks',
   });
+  // An app-authored post can land unapproved in the mod queue — invisible, and
+  // on mobile a fresh "new match" post reads as "deleted". Approve it so it's
+  // live immediately. Best-effort: needs mod, must not fail post creation.
+  try {
+    await post.approve();
+  } catch (error) {
+    console.error('post approve failed:', error);
+  }
   // Seed the lobby so the first visitors can join immediately.
   await createGame(post.id);
   return post;
@@ -42,6 +68,8 @@ export const deleteAllPosts = async (): Promise<number> => {
   await clearRegistries();
   // The tracked daily just got removed — forget it so the menu makes a fresh one.
   await forgetDailyPost();
+  // Reset the install guard so the next install re-seeds the main + daily posts.
+  await redis.del(SETUP_KEY);
   return posts.length;
 };
 

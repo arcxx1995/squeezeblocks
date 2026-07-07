@@ -1,13 +1,30 @@
 import { redis } from "@devvit/web/server";
 import { createInitialGame, submitLine, type GameState } from "../../shared/engine";
 import { botMove } from "../../shared/bot";
-import type { DailyResult, DailyRow, MoveRequest } from "../../shared/online";
+import {
+  BOT_LEVELS,
+  type BotLevel,
+  type DailyLevelView,
+  type DailyResult,
+  type DailyRow,
+  type DailyView,
+  type MoveRequest,
+} from "../../shared/online";
 
 // UTC day — the daily resets at 00:00 UTC.
 // ponytail: UTC, not per-user timezone. Add a TZ offset only if players say the
 // reset feels wrong.
 export function today(now = Date.now()): string {
   return new Date(now).toISOString().slice(0, 10);
+}
+
+// A run may be submitted against the date it was *loaded* on: someone who starts
+// at 23:59 UTC and finishes at 00:01 played yesterday's board, so accept today
+// or yesterday (older is a stale/forged submission). scoreRun still validates the
+// moves against that date's seed, so this can't be abused.
+const DAY_MS = 24 * 60 * 60 * 1000;
+export function isPlayableDailyDate(date: string, now = Date.now()): boolean {
+  return date === today(now) || date === today(now - DAY_MS);
 }
 
 // Day-stable seed from the date string — drives the bot's play for the day.
@@ -17,8 +34,9 @@ export function seedFor(date: string): number {
   return h;
 }
 
-const boardKey = (date: string) => `daily-lb:${date}`;
-const doneKey = (date: string, user: string) => `daily-done:${date}:${user}`;
+const boardKey = (date: string, level: BotLevel) => `daily-lb:${date}:${level}`;
+const doneKey = (date: string, level: BotLevel, user: string) =>
+  `daily-done:${date}:${level}:${user}`;
 const postFlagKey = (postId: string) => `daily-post:${postId}`;
 
 // Mark/detect a post as a daily-challenge post, so the client opens straight
@@ -70,30 +88,65 @@ export async function forgetDailyPost(date = today()): Promise<void> {
 
 export async function playedToday(
   user: string,
+  level: BotLevel,
   date = today(),
 ): Promise<DailyResult | null> {
-  const raw = await redis.get(doneKey(date, user));
+  const raw = await redis.get(doneKey(date, level, user));
   return raw ? (JSON.parse(raw) as DailyResult) : null;
 }
 
-export async function dailyBoard(date = today(), limit = 10): Promise<DailyRow[]> {
-  const rows = await redis.zRange(boardKey(date), 0, limit - 1, {
+export async function dailyBoard(
+  date = today(),
+  level: BotLevel = 1,
+  limit = 10,
+): Promise<DailyRow[]> {
+  const rows = await redis.zRange(boardKey(date, level), 0, limit - 1, {
     by: "rank",
     reverse: true,
   });
   return rows.map((r) => ({ name: r.member, margin: r.score }));
 }
 
+// Light splash summary: viewer's best result so far and whether all three
+// levels are done — no board reads, so the feed card stays cheap.
+export async function playedSummary(
+  user: string,
+  date = today(),
+): Promise<{ best: DailyResult | null; allDone: boolean }> {
+  const results = await Promise.all(BOT_LEVELS.map((lvl) => playedToday(user, lvl, date)));
+  const done = results.filter((r): r is DailyResult => r !== null);
+  const best = done.reduce<DailyResult | null>(
+    (top, r) => (top && top.margin >= r.margin ? top : r),
+    null,
+  );
+  return { best, allDone: done.length === BOT_LEVELS.length };
+}
+
+// The whole day for one viewer: every level's played-result and board, in one
+// shot for the client's level picker.
+export async function dailyView(user: string | null, date = today()): Promise<DailyView> {
+  const levels = await Promise.all(
+    BOT_LEVELS.map(async (level): Promise<DailyLevelView> => {
+      const [played, board] = await Promise.all([
+        user ? playedToday(user, level, date) : Promise.resolve(null),
+        dailyBoard(date, level),
+      ]);
+      return { level, played, board };
+    }),
+  );
+  return { date, seed: seedFor(date), me: user, levels };
+}
+
 const HUMAN = "you";
 const BOT = "bot";
 
 // Play the bot's whole turn (a capture keeps its turn) deterministically.
-function runBot(state: GameState, seed: number): GameState {
+function runBot(state: GameState, seed: number, level: BotLevel): GameState {
   const guardMax = Object.keys(state.lines).length + 1;
   for (let i = 0; i < guardMax; i += 1) {
     if (state.status !== "active") break;
     if (state.players[state.currentPlayerIndex]!.id !== BOT) break;
-    const mv = botMove(state, seed);
+    const mv = botMove(state, seed, level);
     if (!mv) break;
     const next = submitLine(state, mv.orientation, mv.row, mv.col, 0);
     if (next === state) break; // rejected/owned — stop
@@ -109,6 +162,7 @@ function runBot(state: GameState, seed: number): GameState {
 export function scoreRun(
   date: string,
   moves: MoveRequest[],
+  level: BotLevel,
 ): { margin: number; you: number; bot: number } {
   const seed = seedFor(date);
   const base = createInitialGame(0, 2);
@@ -124,7 +178,7 @@ export function scoreRun(
     const next = submitLine(state, mv.orientation, mv.row, mv.col, 0);
     if (next === state) throw new Error("Illegal daily move");
     state = next;
-    state = runBot(state, seed); // bot answers immediately
+    state = runBot(state, seed, level); // bot answers immediately
   }
 
   if (state.status !== "completed") throw new Error("Daily game not finished");
@@ -139,14 +193,15 @@ export function scoreRun(
 export async function recordDaily(
   user: string,
   moves: MoveRequest[],
+  level: BotLevel,
   date = today(),
-): Promise<{ result: DailyResult; board: DailyRow[] }> {
-  const existing = await playedToday(user, date);
-  if (existing) return { result: existing, board: await dailyBoard(date) };
+): Promise<DailyResult> {
+  const existing = await playedToday(user, level, date);
+  if (existing) return existing;
 
-  const { margin, you, bot } = scoreRun(date, moves);
-  const result: DailyResult = { date, margin, you, bot };
-  await redis.set(doneKey(date, user), JSON.stringify(result));
-  await redis.zAdd(boardKey(date), { member: user, score: margin });
-  return { result, board: await dailyBoard(date) };
+  const { margin, you, bot } = scoreRun(date, moves, level);
+  const result: DailyResult = { date, level, margin, you, bot };
+  await redis.set(doneKey(date, level, user), JSON.stringify(result));
+  await redis.zAdd(boardKey(date, level), { member: user, score: margin });
+  return result;
 }

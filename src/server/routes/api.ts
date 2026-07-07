@@ -1,17 +1,19 @@
 import { Hono } from 'hono';
 import { context, reddit } from '@devvit/web/server';
-import type {
-  ApiError,
-  DailyResult,
-  DailyView,
-  MoveRequest,
-  OnlineGame,
-  OnlineView,
+import {
+  BOT_LEVELS,
+  type ApiError,
+  type BotLevel,
+  type DailyResult,
+  type DailyView,
+  type MoveRequest,
+  type OnlineGame,
+  type OnlineView,
 } from '../../shared/online';
 import { applyBotMove, applyMove, applyResign, applySkip, createGame, findOpenGame, joinGame, loadGame, rememberPendingPost, reusablePendingPost, seedRematch } from '../core/game';
 import { getStats, topLeaderboard } from '../core/stats';
-import { dailyBoard, isDailyPost, playedToday, recordDaily, seedFor, today } from '../core/daily';
-import { createPost, postCommentUrl } from '../core/post';
+import { dailyView, isDailyPost, isPlayableDailyDate, playedSummary, recordDaily, today } from '../core/daily';
+import { createPost, isPostLive, postCommentUrl } from '../core/post';
 import { broadcast, notifyNextTurn, notifyRematchInvite, notifyResignWin } from '../core/notify';
 
 export const api = new Hono();
@@ -49,7 +51,9 @@ api.post('/new-game', async (c) => {
     const username = await reddit.getCurrentUsername();
     if (username) {
       const reuse = await reusablePendingPost(username);
-      if (reuse) {
+      // Reuse only if that lobby's post is still live — a removed one would
+      // navigate the user straight to "removed by moderator".
+      if (reuse && (await isPostLive(reuse))) {
         return c.json<{ url: string }>({ url: postCommentUrl(reuse, context.subredditName) });
       }
     }
@@ -152,11 +156,16 @@ api.get('/splash', async (c) => {
     const postId = requirePostId();
     const daily = await isDailyPost(postId);
     let played: DailyResult | null = null;
+    let allDone = false;
     if (daily) {
       const me = await reddit.getCurrentUsername();
-      if (me) played = await playedToday(me);
+      if (me) ({ best: played, allDone } = await playedSummary(me));
     }
-    return c.json<{ daily: boolean; played: DailyResult | null }>({ daily, played });
+    return c.json<{ daily: boolean; played: DailyResult | null; allDone: boolean }>({
+      daily,
+      played,
+      allDone,
+    });
   } catch (error) {
     return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
   }
@@ -272,33 +281,32 @@ api.post('/rematch', async (c) => {
 api.get('/daily', async (c) => {
   try {
     const me = (await reddit.getCurrentUsername()) ?? null;
-    const date = today();
-    const [played, board] = await Promise.all([
-      me ? playedToday(me, date) : Promise.resolve(null),
-      dailyBoard(date),
-    ]);
-    return c.json<DailyView>({ date, seed: seedFor(date), me, played, board });
+    return c.json<DailyView>(await dailyView(me));
   } catch (error) {
     return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
   }
 });
 
-// Submit a finished daily run: server replays the moves to score it (client
-// score is never trusted), records it, and returns the updated board.
+// Submit a finished daily run for one level: server replays the moves to score
+// it (client score is never trusted), records it, and returns the refreshed
+// per-level view.
 api.post('/daily', async (c) => {
   try {
     const me = await reddit.getCurrentUsername();
     if (!me) throw new Error('You must be signed in to Reddit to play');
-    const body = (await c.req.json().catch(() => ({}))) as { moves?: MoveRequest[] };
+    const body = (await c.req.json().catch(() => ({}))) as {
+      moves?: MoveRequest[];
+      level?: number;
+      date?: string;
+    };
     if (!Array.isArray(body.moves)) throw new Error('No moves submitted');
-    const { result, board } = await recordDaily(me, body.moves);
-    return c.json<DailyView>({
-      date: result.date,
-      seed: seedFor(result.date),
-      me,
-      played: result,
-      board,
-    });
+    if (!BOT_LEVELS.includes(body.level as BotLevel)) throw new Error('Bad level');
+    // Score/record under the date the run was PLAYED (sent by the client), not
+    // the submit time — otherwise a run that crosses midnight replays against the
+    // wrong day's bot and gets rejected. Bounded to today/yesterday.
+    const date = typeof body.date === 'string' && isPlayableDailyDate(body.date) ? body.date : today();
+    await recordDaily(me, body.moves, body.level as BotLevel, date);
+    return c.json<DailyView>(await dailyView(me));
   } catch (error) {
     return c.json<ApiError>({ status: 'error', message: message(error) }, 400);
   }

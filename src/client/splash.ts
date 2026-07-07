@@ -25,18 +25,20 @@ if (titleElement && context.username) {
   titleElement.textContent = `Your move, ${name}`;
   void fetch('/api/splash')
     .then((r) => (r.ok ? r.json() : null))
-    .then((data: { daily?: boolean; played?: Played | null } | null) => {
+    .then((data: { daily?: boolean; played?: Played | null; allDone?: boolean } | null) => {
       if (!data?.daily) return;
-      if (data.played) {
+      // "Done" only once all three levels are cleared; a best-so-far result still
+      // shows on the card while levels remain.
+      if (data.allDone && data.played) {
         const p = data.played;
         titleElement.textContent = `${name}, you've done today's daily`;
         if (descriptionElement) {
           const outcome =
             p.margin > 0
-              ? `You beat the bot by ${p.margin}`
+              ? `Best: you beat the bot by ${p.margin}`
               : p.margin < 0
-                ? `Bot won by ${-p.margin}`
-                : 'Dead heat';
+                ? `Best: bot won by ${-p.margin}`
+                : 'Best: dead heat';
           descriptionElement.textContent = `${outcome} · You ${p.you} · Bot ${p.bot} · back tomorrow`;
         }
         startButton.textContent = 'See result';

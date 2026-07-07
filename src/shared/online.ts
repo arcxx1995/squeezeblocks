@@ -36,16 +36,32 @@ export type UserStats = {
 export type LeaderRow = { name: string; wins: number };
 
 // Daily challenge: solo vs a day-seeded bot, ranked by margin (your boxes minus
-// the bot's). One attempt per UTC day — the reason to come back tomorrow.
-export type DailyResult = { date: string; margin: number; you: number; bot: number };
+// the bot's). Three bot strengths, one attempt each per UTC day — the reason to
+// come back tomorrow.
+export type BotLevel = 1 | 2 | 3;
+export const BOT_LEVELS: BotLevel[] = [1, 2, 3];
+
+export type DailyResult = {
+  date: string;
+  level: BotLevel;
+  margin: number;
+  you: number;
+  bot: number;
+};
 export type DailyRow = { name: string; margin: number };
+
+// Per-level slice of the day: your result (if played) and that level's board.
+export type DailyLevelView = {
+  level: BotLevel;
+  played: DailyResult | null;
+  board: DailyRow[];
+};
 
 export type DailyView = {
   date: string;
   seed: number; // drives the bot so the client can play the exact day's game
   me: string | null;
-  played: DailyResult | null; // your result if you've already played today
-  board: DailyRow[]; // today's top margins
+  levels: DailyLevelView[]; // one entry per bot level
 };
 
 export type OnlineView = {

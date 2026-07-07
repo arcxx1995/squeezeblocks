@@ -7,7 +7,7 @@ import {
   type LineOrientation,
 } from "../shared/engine";
 import { botMove } from "../shared/bot";
-import type { DailyView, MoveRequest } from "../shared/online";
+import { BOT_LEVELS, type BotLevel, type DailyView, type MoveRequest } from "../shared/online";
 import { GameBoard } from "./board";
 
 // Build the day's starting game: seat 0 = you (starts), seat 1 = the bot. Same
@@ -25,17 +25,27 @@ function freshDaily(): GameState {
 
 const BOT_STEP_MS = 350;
 
+const LEVEL_META: Record<BotLevel, { name: string; blurb: string }> = {
+  1: { name: "Easy", blurb: "greedy — gives boxes away" },
+  2: { name: "Medium", blurb: "plays it safe" },
+  3: { name: "Hard", blurb: "chain master" },
+};
+
 export function DailyChallenge({ onExit }: { onExit?: () => void }) {
   const [info, setInfo] = useState<DailyView | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [level, setLevel] = useState<BotLevel | null>(null);
   const [state, setState] = useState<GameState | null>(null);
   const [lastMoveId, setLastMoveId] = useState<string | null>(null);
   const [botThinking, setBotThinking] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const movesRef = useRef<MoveRequest[]>([]);
   const timersRef = useRef<number[]>([]);
+  // The date the current run was loaded/played on — submitted with the run so a
+  // game that crosses midnight is still scored against the day it was played.
+  const dateRef = useRef<string>("");
 
-  // Load today's challenge. If already played, we only show the result + board.
+  // Load today's challenge (all three levels' status + boards).
   useEffect(() => {
     void (async () => {
       try {
@@ -43,7 +53,6 @@ export function DailyChallenge({ onExit }: { onExit?: () => void }) {
         const data = await res.json();
         if (!res.ok) throw new Error(data?.message ?? "Could not load the daily");
         setInfo(data as DailyView);
-        if (!(data as DailyView).played) setState(freshDaily());
       } catch (err) {
         setError(err instanceof Error ? err.message : "Could not load the daily");
       }
@@ -51,17 +60,21 @@ export function DailyChallenge({ onExit }: { onExit?: () => void }) {
     return () => timersRef.current.forEach((t) => window.clearTimeout(t));
   }, []);
 
-  const submitRun = useCallback(async (moves: MoveRequest[]) => {
+  const submitRun = useCallback(async (moves: MoveRequest[], lvl: BotLevel) => {
     setSubmitting(true);
     try {
       const res = await fetch("/api/daily", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ moves }),
+        body: JSON.stringify({ moves, level: lvl, date: dateRef.current }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.message ?? "Could not submit your run");
       setInfo(data as DailyView);
+      // Back to the daily lobby: the level picker, now showing this run's margin
+      // on its card and the other levels still open to play.
+      setState(null);
+      setLevel(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not submit your run");
     } finally {
@@ -71,16 +84,16 @@ export function DailyChallenge({ onExit }: { onExit?: () => void }) {
 
   // Run the bot's whole turn locally, one line at a time, then hand back to you.
   const runBot = useCallback(
-    (start: GameState, seed: number) => {
+    (start: GameState, seed: number, lvl: BotLevel) => {
       setBotThinking(true);
       let s = start;
       const tick = () => {
         if (s.status !== "active" || s.players[s.currentPlayerIndex]!.id !== "bot") {
           setBotThinking(false);
-          if (s.status === "completed") void submitRun(movesRef.current);
+          if (s.status === "completed") void submitRun(movesRef.current, lvl);
           return;
         }
-        const mv = botMove(s, seed);
+        const mv = botMove(s, seed, lvl);
         if (!mv) {
           setBotThinking(false);
           return;
@@ -95,8 +108,27 @@ export function DailyChallenge({ onExit }: { onExit?: () => void }) {
     [submitRun],
   );
 
+  // Pick a level: start a fresh game if unplayed, else just view its board.
+  const selectLevel = (lvl: BotLevel) => {
+    if (botThinking || submitting) return;
+    timersRef.current.forEach((t) => window.clearTimeout(t));
+    timersRef.current = [];
+    setError(null);
+    setLevel(lvl);
+    setLastMoveId(null);
+    setBotThinking(false);
+    const played = info?.levels.find((l) => l.level === lvl)?.played;
+    if (played) {
+      setState(null);
+    } else {
+      movesRef.current = [];
+      dateRef.current = info?.date ?? ""; // pin the run to the day it was loaded
+      setState(freshDaily());
+    }
+  };
+
   const onDrawLine = (orientation: LineOrientation, row: number, col: number) => {
-    if (!state || !info || botThinking) return;
+    if (!state || !info || level == null || botThinking) return;
     if (state.status !== "active" || state.players[state.currentPlayerIndex]!.id !== "you") return;
     const next = submitLine(state, orientation, row, col, 0);
     if (next === state) return; // illegal / owned
@@ -104,13 +136,14 @@ export function DailyChallenge({ onExit }: { onExit?: () => void }) {
     setLastMoveId(lineId(orientation, row, col));
     setState(next);
     if (next.status === "completed") {
-      void submitRun(movesRef.current);
+      void submitRun(movesRef.current, level);
     } else if (next.players[next.currentPlayerIndex]!.id === "bot") {
-      runBot(next, info.seed);
+      runBot(next, info.seed, level);
     }
   };
 
-  const played = info?.played ?? null;
+  const activeLevel = level != null ? info?.levels.find((l) => l.level === level) ?? null : null;
+  const played = activeLevel?.played ?? null;
 
   return (
     <main className="app-phone-viewport text-white">
@@ -138,40 +171,74 @@ export function DailyChallenge({ onExit }: { onExit?: () => void }) {
 
         {info ? (
           <p className="font-mono text-xs uppercase tracking-[0.12em] text-white/50">
-            {info.date} · same board for everyone · one try
+            {info.date} · same board for everyone · one try per level
           </p>
+        ) : null}
+
+        {/* Level picker: pick your bot. Played levels show your margin. */}
+        {info ? (
+          <section className="mt-3 grid grid-cols-3 gap-2">
+            {BOT_LEVELS.map((lvl) => {
+              const lv = info.levels.find((l) => l.level === lvl);
+              const res = lv?.played ?? null;
+              const selected = lvl === level;
+              return (
+                <button
+                  key={lvl}
+                  type="button"
+                  onClick={() => selectLevel(lvl)}
+                  disabled={botThinking || submitting}
+                  className={`flex flex-col gap-1 rounded-lg border p-3 text-left transition disabled:opacity-60 ${
+                    selected
+                      ? "border-[#DCEEB1] bg-[#111111]"
+                      : "border-white/15 bg-[#111111] hover:border-white/40"
+                  }`}
+                >
+                  <span className="text-sm font-extrabold text-white">{LEVEL_META[lvl].name}</span>
+                  <span className="font-mono text-[10px] uppercase tracking-[0.1em] text-white/45">
+                    {LEVEL_META[lvl].blurb}
+                  </span>
+                  <span
+                    className={`font-mono text-xs ${res ? "text-[#DCEEB1]" : "text-white/60"}`}
+                  >
+                    {res ? (res.margin > 0 ? `+${res.margin}` : res.margin) : "Play →"}
+                  </span>
+                </button>
+              );
+            })}
+          </section>
         ) : null}
 
         {played ? (
           <section className="mt-3 rounded-lg border border-white/15 bg-[#DCEEB1] p-4 text-black">
             <p className="text-xl font-bold">
               {played.margin > 0
-                ? `You beat the bot by ${played.margin}`
+                ? `You beat ${LEVEL_META[played.level].name} by ${played.margin}`
                 : played.margin < 0
-                  ? `Bot won by ${-played.margin}`
+                  ? `${LEVEL_META[played.level].name} bot won by ${-played.margin}`
                   : "Dead heat"}
             </p>
             <p className="font-mono text-xs uppercase tracking-[0.12em] text-black/65">
-              You {played.you} · Bot {played.bot} · come back tomorrow
+              You {played.you} · Bot {played.bot} · one try per level
             </p>
           </section>
         ) : null}
 
-        {info && info.board.length > 0 ? (
+        {activeLevel && activeLevel.board.length > 0 ? (
           <section className="mt-3 rounded-lg border border-white/15 bg-[#111111] p-4">
             <p className="font-mono text-[10px] uppercase tracking-[0.14em] text-white/50">
-              Today&apos;s top margins
+              {LEVEL_META[activeLevel.level].name} · top margins
             </p>
             <ol className="mt-2 flex flex-col gap-1">
-              {info.board.map((row, i) => (
+              {activeLevel.board.map((row, i) => (
                 <li
                   key={row.name}
                   className={`flex items-center justify-between text-sm ${
-                    row.name === info.me ? "font-bold text-[#DCEEB1]" : "text-white/80"
+                    row.name === info?.me ? "font-bold text-[#DCEEB1]" : "text-white/80"
                   }`}
                 >
                   <span className="truncate">
-                    {i + 1}. {row.name === info.me ? "You" : row.name}
+                    {i + 1}. {row.name === info?.me ? "You" : row.name}
                   </span>
                   <span className="font-mono">{row.margin > 0 ? `+${row.margin}` : row.margin}</span>
                 </li>
@@ -214,6 +281,10 @@ export function DailyChallenge({ onExit }: { onExit?: () => void }) {
               />
             </section>
           </>
+        ) : level == null ? (
+          <p className="mt-4 font-mono text-xs text-white/50">
+            Pick a bot above to start. Beat all three for the full daily.
+          </p>
         ) : null}
 
         {error ? <p className="pt-2 font-mono text-xs text-[#F3C9B6]">{error}</p> : null}

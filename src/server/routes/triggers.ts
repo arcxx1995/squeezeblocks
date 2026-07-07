@@ -1,19 +1,26 @@
 import { Hono } from 'hono';
 import type { OnAppInstallRequest, TriggerResponse } from '@devvit/web/shared';
-import { context } from '@devvit/web/server';
-import { createDailyPost, createPost, deleteAllPosts } from '../core/post';
+import { context, redis } from '@devvit/web/server';
+import { createDailyPost, createPost, SETUP_KEY } from '../core/post';
 
 export const triggers = new Hono();
 
 triggers.post('/on-app-install', async (c) => {
   try {
-    // Clear leftover posts from a prior install (uninstall doesn't remove them),
-    // so an old community-pinned daily can't linger above the fresh main post.
-    try {
-      await deleteAllPosts();
-    } catch (error) {
-      console.error('install cleanup failed:', error);
+    const input = await c.req.json<OnAppInstallRequest>();
+
+    // Devvit re-fires onAppInstall on EVERY version install — including each
+    // playtest hot-reload (version bumps .2 → .4 → .8…). The old handler ran
+    // deleteAllPosts() here, so every reload mod-removed every post in the sub:
+    // any post you were viewing — or a new-match/rematch post you'd just made —
+    // showed "moderator deleted this post". Guard so first-install setup runs
+    // once and later installs no-op. Manual clearing still lives on the mod menu.
+    // ponytail: get→set, not atomic — fine for a non-concurrent install trigger.
+    if (await redis.get(SETUP_KEY)) {
+      return c.json<TriggerResponse>({ status: 'success', message: 'already set up' }, 200);
     }
+    await redis.set(SETUP_KEY, '1');
+
     const post = await createPost();
     // Pin the main app post to the top (slot 1). Daily posts are not stickied,
     // so they land in the normal feed below it. Best-effort: needs mod, must not
@@ -30,7 +37,6 @@ triggers.post('/on-app-install', async (c) => {
     } catch (error) {
       console.error('daily post on install failed:', error);
     }
-    const input = await c.req.json<OnAppInstallRequest>();
 
     return c.json<TriggerResponse>(
       {
