@@ -25,8 +25,11 @@ const FALLBACK_POLL_MS = 5000;
 // realtime-only and can be missed (cross-post matchmaking broadcast), so poll
 // fast until play begins.
 const LOBBY_POLL_MS = 3000;
-// Pause between lines when replaying a bot's multi-move turn. Knob.
-const BOT_REVEAL_STEP_MS = 350;
+// Human-ish pacing for replaying a bot's turn: a "thinking" pause before its
+// first line, then an uneven line-to-line rhythm. A flat cadence (or an
+// instant single move) reads as a machine.
+const botThinkMs = () => 700 + Math.random() * 900;
+const botStepMs = () => 400 + Math.random() * 500;
 
 // Ids of every owned (drawn) line in a view — the diff baseline for the reveal
 // animation.
@@ -159,9 +162,14 @@ export function OnlineGame() {
             ? [...nextOwned].filter((id) => !prev.has(id))
             : [];
 
-      if (added.length > 1) {
+      // explicitOrder only exists for bot turns, so stage even a single bot
+      // line behind the thinking pause. A lone line WITHOUT an order is a
+      // human's move (ours or a live opponent's) — show it immediately.
+      const isBotTurn = !!explicitOrder && explicitOrder.length > 0;
+      if (added.length > 1 || (isBotTurn && added.length === 1)) {
         setHiddenLineIds(new Set(added));
-        added.forEach((id, i) => {
+        let at = botThinkMs();
+        for (const id of added) {
           const t = window.setTimeout(
             () =>
               setHiddenLineIds((cur) => {
@@ -169,10 +177,11 @@ export function OnlineGame() {
                 nextSet.delete(id);
                 return nextSet;
               }),
-            (i + 1) * BOT_REVEAL_STEP_MS,
+            at,
           );
           revealTimersRef.current.push(t);
-        });
+          at += botStepMs();
+        }
       } else {
         setHiddenLineIds(new Set());
       }
@@ -690,7 +699,10 @@ export function OnlineGame() {
           screen on one page (no scroll). */}
       {game.phase === "playing" ? (
         <section className="rounded-lg border border-white/15 bg-[#C5B0F4] p-4 text-black">
-          <div className="flex items-center justify-between gap-3">
+          {/* min-h matches the size-14 countdown circle so the banner (and the
+              flex-1 board below) keeps the same height whether or not the
+              circle is rendered — no board resize on turn change. */}
+          <div className="flex min-h-14 items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="truncate text-xl font-bold leading-snug">
                 {isMyTurn ? "Your turn" : "Match in progress"}

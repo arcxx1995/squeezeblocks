@@ -25,7 +25,10 @@ function freshDaily(): GameState {
   };
 }
 
-const BOT_STEP_MS = 350;
+// Human-ish pacing: the bot "thinks" before its turn, then plays each line at a
+// slightly uneven pace — a flat metronome reads as a machine.
+const botThinkMs = () => 700 + Math.random() * 900;
+const botStepMs = () => 400 + Math.random() * 500;
 
 const LEVEL_META: Record<BotLevel, { name: string }> = {
   1: { name: "Easy" },
@@ -103,9 +106,9 @@ export function DailyChallenge({ onExit }: { onExit?: () => void }) {
         s = submitLine(s, mv.orientation, mv.row, mv.col, 0);
         setState(s);
         setLastMoveId(lineId(mv.orientation, mv.row, mv.col));
-        timersRef.current.push(window.setTimeout(tick, BOT_STEP_MS));
+        timersRef.current.push(window.setTimeout(tick, botStepMs()));
       };
-      timersRef.current.push(window.setTimeout(tick, 250));
+      timersRef.current.push(window.setTimeout(tick, botThinkMs()));
     },
     [submitRun],
   );
