@@ -422,6 +422,7 @@ export async function resetToRematch(
       startPlaying(game, now); // rebuild a fresh board from the existing seats
       game.statsRecorded = false; // let the new game's result book
       game.doneAt = undefined; // no longer finished → drops out of cleanup
+      game.skipStreak = 0; // fresh match
     },
     { now },
   );
@@ -441,6 +442,7 @@ export async function resetToLobby(
       game.state = null;
       game.doneAt = undefined;
       game.statsRecorded = false;
+      game.skipStreak = 0;
     },
     { now },
   );
@@ -454,6 +456,9 @@ export async function resetToLobby(
 async function recordResultIfDone(game: OnlineGame, now: number): Promise<boolean> {
   try {
     if (game.phase !== "done" || !game.state) return true;
+    // Abandoned game (forced done by the reaper) never completed the board, so
+    // its box counts aren't a real result — book nothing.
+    if (game.state.status !== "completed") return true;
     if (game.statsRecorded) return true;
     let g = game;
     // Freeze the ELO deltas once, from pre-game ratings, before any stat is
@@ -518,6 +523,7 @@ export async function applyMove(
 
       applyAsyncDeadline(next, now);
       g.state = next;
+      g.skipStreak = 0; // a real move → not abandoned
       if (next.status === "completed") {
         g.phase = "done";
       }
@@ -576,6 +582,7 @@ export async function applySkip(
       const next = skipTurn(state, now);
       applyAsyncDeadline(next, now);
       g.state = next;
+      g.skipStreak = 0; // a human is present and acting → not abandoned
       if (next.status === "completed") g.phase = "done";
     },
     { now },
@@ -632,6 +639,7 @@ function runBotTurn(game: OnlineGame, now: number): string[] {
   }
   if (drawn.length > 0) {
     game.state = state;
+    game.skipStreak = 0; // a real move → not abandoned
     if (state.status === "completed") game.phase = "done";
   }
   return drawn;
@@ -730,13 +738,21 @@ async function sweepOne(postId: string, now: number): Promise<SweptGame | null> 
       if (g.phase !== "playing" || !g.state) return;
       const isBot = g.seats[g.state.currentPlayerIndex]?.isBot === true;
       if (isBot) {
-        revealOrder = runBotTurn(g, now);
+        revealOrder = runBotTurn(g, now); // resets skipStreak on any line drawn
         if (revealOrder.length > 0) changed = true;
       } else if (now >= g.state.turnDeadlineAt) {
         const next = skipTurn(g.state, now);
         applyAsyncDeadline(next, now);
         g.state = next;
-        if (next.status === "completed") g.phase = "done";
+        g.skipStreak = (g.skipStreak ?? 0) + 1;
+        // A full round of system-skips with nobody moving = the match was
+        // abandoned. Force it done so the existing DONE cleanup removes the dead
+        // post. status stays "active" (skipTurn draws no line), which flags it as
+        // a non-result → recordResultIfDone books no stats/ELO.
+        // ponytail: threshold = one skip per seat; raise if async games ever idle
+        // a legitimate full lap.
+        const abandoned = g.skipStreak >= Math.max(2, g.seats.length);
+        if (next.status === "completed" || abandoned) g.phase = "done";
         changed = true;
       }
     },

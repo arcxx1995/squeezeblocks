@@ -19,6 +19,7 @@ export type OnlineGame = {
   state: GameState | null; // null while in lobby
   createdAt: number;
   reminderSentAt?: number; // state.turnStartedAt we've DMed a pre-expiry reminder for
+  skipStreak?: number; // consecutive scheduler system-skips with no move; a full round → abandoned
   statsRecorded?: boolean; // set once the finished game's result is booked to stats
   invitedId?: string; // rematch: the only stranger allowed to take the open seat
   doneAt?: number; // when the game finished (phase → done); drives the 5-min post cleanup

@@ -1,6 +1,6 @@
 import {
   createGame, joinGame, applyMove, applySkip, applyBotMove, applyResign,
-  loadGame, findOpenGame, sweepDueGames,
+  loadGame, findOpenGame, sweepDueGames, dueDonePosts,
 } from "../src/server/core/game.ts";
 import { resign } from "../src/shared/engine.ts";
 import { getStats } from "../src/server/core/stats.ts";
@@ -280,6 +280,45 @@ section("I. Scheduler sweep: reminder then system-skip; bot advance");
   } else {
     ok(true, "I: (first line captured, bot not up — skipped bot-sweep check)");
   }
+}
+
+// -------------------------------------------------------------------------
+section("L. Abandoned match: two no-shows → forced done, no stats, queued for cleanup");
+{
+  __reset();
+  await joinGame("L", "alice", false, T0);
+  await joinGame("L", "bob", false, T0);
+  // alice never plays the opening → system-skipped at the 10m opening fuse (skip #1).
+  let s = await sweepDueGames(T0 + 10 * 60 * 1000 + 1);
+  ok(s.length === 1 && s[0].kind === "advanced", "L: opening no-show system-skipped");
+  let g = await loadGame("L");
+  ok(g.phase === "playing" && g.skipStreak === 1, "L: one skip → still playing");
+  // bob also never plays → system-skipped at his 24h deadline (skip #2 = full
+  // round with no move → abandoned).
+  s = await sweepDueGames(T0 + 10 * 60 * 1000 + DAY + 1);
+  ok(s.length === 1, "L: second no-show swept");
+  g = await loadGame("L");
+  ok(g.phase === "done", "L: a full round of system-skips forces the game done");
+  ok(g.state.status !== "completed", "L: forced-done game never completed the board");
+  ok(g.skipStreak >= g.seats.length, "L: streak reached a full round of seats");
+  // No result booked for an abandoned game.
+  const as = await getStats("alice");
+  const bs = await getStats("bob");
+  ok(as.wins + as.losses === 0 && bs.wins + bs.losses === 0, "L: abandoned game books no stats");
+  // Rides the existing DONE cleanup so the sweep removes the dead post.
+  const due = await dueDonePosts(T0 + 10 * 60 * 1000 + DAY + 60 * 1000);
+  ok(due.includes("L"), "L: abandoned game queued for post cleanup");
+
+  // A single missed turn must NOT reap: alice replies after bob's one no-show.
+  __reset();
+  await joinGame("M", "alice", false, T0);
+  let gm = await joinGame("M", "bob", false, T0);
+  gm = await applyMove("M", "alice", openLine(gm), T0); // alice opens → bob up
+  await sweepDueGames(T0 + DAY + 1); // bob no-show once → skip #1
+  gm = await loadGame("M");
+  ok(gm.phase === "playing" && gm.skipStreak === 1, "M: one missed turn does not reap");
+  gm = await applyMove("M", activeUser(gm), openLine(gm), T0 + DAY + 2); // alice plays again
+  ok(gm.skipStreak === 0, "M: a real move clears the skip streak");
 }
 
 // -------------------------------------------------------------------------
