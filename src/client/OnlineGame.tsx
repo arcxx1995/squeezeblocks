@@ -233,7 +233,10 @@ export function OnlineGame() {
     connectRealtime<GameChannelMessage>({
       channel,
       onMessage: (msg) => {
-        if (!msg?.game || pendingRef.current) return;
+        // A push omits dailyPost/daily; applying one on a daily post would flip
+        // the screen off <DailyChallenge> into the match lobby. Daily channels
+        // never broadcast today, so this is a guard, not a live fix.
+        if (!msg?.game || pendingRef.current || viewRef.current?.dailyPost) return;
         // Watchers (the scheduler, or the other player) animate the bot turn
         // too, using the server's reveal order. No fresh serverNow on a push, so
         // keep the last clock offset (syncClock: false).

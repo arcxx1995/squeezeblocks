@@ -1,7 +1,7 @@
 import { Hono } from 'hono';
 import { dueAbandonedLobbies, dueDonePosts, ensureStatsRecorded, purgeGame, resetToLobby, sweepDueGames } from '../core/game';
 import { broadcast, notifyNextTurn, notifyTurnExpiring } from '../core/notify';
-import { claimDailyPost, releaseDailyPost, today } from '../core/daily';
+import { today } from '../core/daily';
 import { createDailyPost, createOrReuseMainPost, ensureTodayDaily, getMainPostId, isPostLive, removePost } from '../core/post';
 
 export const scheduler = new Hono();
@@ -18,15 +18,15 @@ scheduler.post('/daily', async (c) => {
   } catch (error) {
     console.error('hub ensure on daily cron failed:', error);
   }
-  if (!(await claimDailyPost(date))) return c.json({ status: 'skipped' });
+  // createDailyPost owns the atomic once-per-day claim now, so a double-fire (or
+  // a 00:00 sweep tick coinciding) is deduped inside it — null means already made.
   try {
-    await createDailyPost(date);
+    const post = await createDailyPost(date);
+    return c.json({ status: post ? 'ok' : 'skipped' });
   } catch (error) {
-    console.error('daily post cron failed:', error);
-    await releaseDailyPost(date); // let the next sweep retry
+    console.error('daily post cron failed:', error); // claim already freed inside
     return c.json({ status: 'error' }, 500);
   }
-  return c.json({ status: 'ok' });
 });
 
 // Cron-driven turn sweep (see devvit.json scheduler.tasks). Advances bot turns

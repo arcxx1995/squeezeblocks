@@ -27,6 +27,12 @@ export function isPlayableDailyDate(date: string, now = Date.now()): boolean {
   return date === today(now) || date === today(now - DAY_MS);
 }
 
+// The date one day before `date` (YYYY-MM-DD) — the daily a new day's post
+// supersedes and should sweep.
+export function priorDay(date: string): string {
+  return today(new Date(`${date}T00:00:00Z`).getTime() - DAY_MS);
+}
+
 // Day-stable seed from the date string — drives the bot's play for the day.
 export function seedFor(date: string): number {
   let h = 7;
@@ -55,22 +61,23 @@ export async function unmarkDailyPost(postId: string): Promise<void> {
   await redis.del(postFlagKey(postId));
 }
 
-const dailyPostClaimKey = (date: string) => `daily-post-created:${date}`;
+// Once-per-day daily-post claim, held as a date field in one hash. hSetNX is
+// atomic, so the 00:00 cron and an overlapping 30s sweep tick can't both win the
+// claim and double- (or triple-) create the day's daily.
+// ponytail: dead date fields accumulate one-per-day; negligible, prune only if
+// the hash ever grows to matter.
+const DAILY_CLAIM_HASH = "daily-post-claims";
 
 // Claim the once-per-day daily post. Returns true for the first caller of the
-// day, false if today's post was already created — so the cron is idempotent
-// against retries / double-fires.
-// ponytail: get→set, not atomic. Fine for a single 00:00 cron; swap to SET NX
-// if the task ever fans out to concurrent workers.
+// day, false if today's post was already claimed — so every creation path
+// (cron, sweep self-heal) is idempotent against retries / double-fires.
 export async function claimDailyPost(date = today()): Promise<boolean> {
-  if (await redis.get(dailyPostClaimKey(date))) return false;
-  await redis.set(dailyPostClaimKey(date), "1");
-  return true;
+  return (await redis.hSetNX(DAILY_CLAIM_HASH, date, "1")) === 1;
 }
 
 // Release the claim so a failed creation retries on the next sweep.
 export async function releaseDailyPost(date = today()): Promise<void> {
-  await redis.del(dailyPostClaimKey(date));
+  await redis.hDel(DAILY_CLAIM_HASH, [date]);
 }
 
 // Post id of today's daily, if one was created — lets the menu reuse it instead
@@ -89,7 +96,7 @@ export async function setDailyPostId(postId: string, date = today()): Promise<vo
 // where the tracked post has just been removed).
 export async function forgetDailyPost(date = today()): Promise<void> {
   await redis.del(dailyPostIdKey(date));
-  await redis.del(dailyPostClaimKey(date));
+  await releaseDailyPost(date); // free the claim so a deleted daily self-heals
 }
 
 export async function playedToday(

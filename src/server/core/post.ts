@@ -1,6 +1,6 @@
 import { reddit, context, redis } from '@devvit/web/server';
 import { clearRegistries, createGame, purgeGame } from './game';
-import { forgetDailyPost, getDailyPostId, markDailyPost, setDailyPostId, today } from './daily';
+import { claimDailyPost, forgetDailyPost, getDailyPostId, markDailyPost, priorDay, releaseDailyPost, setDailyPostId, today, unmarkDailyPost } from './daily';
 
 // Set once the first install seeds the main + daily posts; the install trigger
 // no-ops while it's present so playtest reloads (which re-fire onAppInstall)
@@ -134,27 +134,59 @@ export const deleteAllPosts = async (): Promise<number> => {
   return posts.length;
 };
 
+// Remove the prior day's daily when a new day's daily is created, so dailies
+// don't pile up — the sub keeps just today's (plus the pinned hub). Track-based:
+// only the tracked prior-day post is swept; a backlog of untracked strays is a
+// mod delete-all job. Best-effort: must not fail today's post creation.
+// ponytail: a 23:59 loader mid-run loses the post at 00:00, but the run still
+// submits — scoreRun validates by date+seed, not post existence.
+const removePriorDaily = async (currentDate: string): Promise<void> => {
+  try {
+    const prev = priorDay(currentDate);
+    const prevId = await getDailyPostId(prev);
+    if (!prevId) return;
+    if (await removePost(prevId)) {
+      await purgeGame(prevId);
+      await unmarkDailyPost(prevId);
+      await forgetDailyPost(prev);
+    }
+  } catch (error) {
+    console.error('prior daily cleanup failed:', error);
+  }
+};
+
 // The daily-challenge post: opens straight into the daily. Marked so the client
 // skips the lobby. Not stickied — a stickied custom post renders as a compact
 // pinned card (splash hidden until opened), so it floats in the feed as a full
 // inline splash card instead. The main app post owns sticky slot 1 and stays
 // above it regardless. `date` (YYYY-MM-DD) is appended to the title so
 // auto-posted days are distinguishable.
-export const createDailyPost = async (date?: string) => {
-  const post = await reddit.submitCustomPost({
-    title: `squeezeblocks — Daily Challenge 🔥${date ? ` (${date})` : ''}`,
-  });
-  await markDailyPost(post.id);
-  await setDailyPostId(post.id, date ?? today());
-  // Surface it in the feed. Stickying used to do this implicitly; unstickied, an
-  // app-authored post can sit unapproved in the mod queue (invisible), so
-  // approve it explicitly. Best-effort: needs mod, must not fail the post.
+export const createDailyPost = async (date = today()) => {
+  // Atomic once-per-day gate lives HERE, not in the callers — so EVERY creation
+  // path (00:00 cron, sweep self-heal, menu tap, install) funnels through the
+  // same claim and none can spawn a duplicate daily for `date`. First caller
+  // wins; the rest get null (an existing daily they should navigate to instead).
+  if (!(await claimDailyPost(date))) return null;
   try {
-    await post.approve();
+    const post = await reddit.submitCustomPost({
+      title: `squeezeblocks — Daily Challenge 🔥 (${date})`,
+    });
+    await markDailyPost(post.id);
+    await setDailyPostId(post.id, date);
+    // Surface it in the feed. Stickying used to do this implicitly; unstickied, an
+    // app-authored post can sit unapproved in the mod queue (invisible), so
+    // approve it explicitly. Best-effort: needs mod, must not fail the post.
+    try {
+      await post.approve();
+    } catch (error) {
+      console.error('daily post approve failed:', error);
+    }
+    await removePriorDaily(date); // sweep yesterday's daily
+    return post;
   } catch (error) {
-    console.error('daily post approve failed:', error);
+    await releaseDailyPost(date); // creation failed → free the claim so a retry re-mints
+    throw error;
   }
-  return post;
 };
 
 // Guarantee today's daily exists and is live — creates it if missing/removed.
@@ -162,5 +194,11 @@ export const createDailyPost = async (date?: string) => {
 export const ensureTodayDaily = async (): Promise<void> => {
   const existing = await getDailyPostId();
   if (existing && (await isPostLive(existing))) return;
-  await createDailyPost(today());
+  // A tracked-but-dead daily (mod-removed/spammed — no PostDelete trigger fires,
+  // so the claim was never freed) would deadlock the re-mint: its stale claim
+  // blocks createDailyPost's gate. Free it — but ONLY when we know it's dead,
+  // never when missing, or we'd free a claim the 00:00 cron is mid-create on.
+  // createDailyPost then re-mints (and overwrites the dead tracked id).
+  if (existing) await releaseDailyPost();
+  await createDailyPost(); // claims internally; no-op null if a concurrent tick won
 };

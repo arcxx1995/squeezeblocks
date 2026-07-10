@@ -47,8 +47,16 @@ menu.post('/daily-create', async (c) => {
     // duplicate dailies). A removed one is remade so we never land on "removed
     // by moderator".
     const existing = await getDailyPostId(date);
+    // createDailyPost returns null if another path (cron/sweep/second tap) won
+    // the once-per-day claim first — fall back to the winner's tracked id so we
+    // still navigate to today's daily instead of erroring.
     const postId =
-      existing && (await isPostLive(existing)) ? existing : (await createDailyPost(date)).id;
+      existing && (await isPostLive(existing))
+        ? existing
+        : ((await createDailyPost(date))?.id ?? (await getDailyPostId(date)));
+    if (!postId) {
+      return c.json<UiResponse>({ showToast: 'Daily challenge is being created — try again' }, 503);
+    }
     return c.json<UiResponse>(
       { navigateTo: postCommentUrl(postId, context.subredditName) },
       200
