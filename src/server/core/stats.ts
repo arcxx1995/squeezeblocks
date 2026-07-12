@@ -106,8 +106,9 @@ export async function writeStats(game: OnlineGame): Promise<boolean> {
     if (won) {
       const wins = (await getStats(seat.id)).wins;
       await redis.zAdd(LEADERBOARD_KEY, { member: seat.id, score: wins });
-      await setWinsFlair(seat.id, wins);
     }
+    // Winner and loser ratings both moved — refresh each seat's ELO flair.
+    await setRatingFlair(seat.id, (await getStats(seat.id)).rating);
   }
   await redis.expire(key, BOOKED_TTL);
   return allBooked;
@@ -155,16 +156,26 @@ async function ratingDeltas(
   return delta;
 }
 
-async function setWinsFlair(username: string, wins: number): Promise<void> {
+async function setRatingFlair(username: string, rating: number): Promise<void> {
   try {
     await reddit.setUserFlair({
       subredditName: context.subredditName!,
       username,
-      text: `🏆 ${wins}`,
+      text: `♟️ ${rating}`,
     });
   } catch (error) {
     console.error(`flair set failed for ${username}: ${error}`);
   }
+}
+
+// Flair anyone who comments in the sub with their live ELO. Never-played users
+// flair at the START_RATING baseline — engagement surfaces a rating, not just
+// wins. System accounts skipped (no rating to show).
+// ponytail: one flair write per comment; best-effort, fine for a toy sub. Add a
+// per-user throttle key if the API rate becomes a problem.
+export async function flairCommenter(username: string): Promise<void> {
+  if (username === "AutoModerator" || username === "[deleted]") return;
+  await setRatingFlair(username, (await getStats(username)).rating);
 }
 
 // Top players by all-time wins (index 0 = most wins).

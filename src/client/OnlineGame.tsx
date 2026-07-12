@@ -139,13 +139,18 @@ export function OnlineGame() {
   const present = useCallback(
     (next: OnlineView, explicitOrder: string[] | undefined, syncClock: boolean) => {
       if (syncClock) clockOffsetRef.current = next.serverNow - Date.now();
-      meRef.current = next.me;
+      // Sticky identity: getCurrentUsername() flakes to null on the server now
+      // and then, and the lobby polls every few seconds — without this, one bad
+      // response flips a seated player to "Sign in to Reddit". The server never
+      // un-authenticates mid-session, so null after a known name is always noise.
+      meRef.current = next.me ?? meRef.current;
       // Carry stats forward: keep the freshest we've seen, fall back to it when a
       // push omits them.
       if (next.myStats) statsRef.current.myStats = next.myStats;
       if (next.leaderboard) statsRef.current.leaderboard = next.leaderboard;
       next = {
         ...next,
+        me: meRef.current,
         myStats: next.myStats ?? statsRef.current.myStats,
         leaderboard: next.leaderboard ?? statsRef.current.leaderboard,
       };
@@ -909,7 +914,7 @@ function HowToOverlay({ onClose }: { onClose: () => void }) {
         <p className="font-mono text-xs uppercase tracking-[0.18em] text-[#DCEEB1]">
           How to play
         </p>
-        <h2 className="mt-1 text-2xl font-[340]">Dots &amp; boxes</h2>
+        <h2 className="mt-1 font-mono text-2xl uppercase tracking-[0.18em] text-[#DCEEB1]">squeezeblocks</h2>
         <ul className="mt-4 flex flex-col gap-3 text-sm text-white/80">
           <li>Drag between two neighbouring dots to draw a line.</li>
           <li>Close the 4th side of a box to claim it — and take another turn.</li>

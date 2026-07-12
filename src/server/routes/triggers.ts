@@ -1,8 +1,14 @@
 import { Hono } from 'hono';
-import type { OnAppInstallRequest, OnPostDeleteRequest, TriggerResponse } from '@devvit/web/shared';
+import type {
+  OnAppInstallRequest,
+  OnCommentCreateRequest,
+  OnPostDeleteRequest,
+  TriggerResponse,
+} from '@devvit/web/shared';
 import { context, redis } from '@devvit/web/server';
 import { createDailyPost, createOrReuseMainPost, SETUP_KEY } from '../core/post';
 import { purgeGame } from '../core/game';
+import { flairCommenter } from '../core/stats';
 import { forgetDailyPost, getDailyPostId, unmarkDailyPost } from '../core/daily';
 
 export const triggers = new Hono();
@@ -50,6 +56,23 @@ triggers.post('/on-app-install', async (c) => {
       },
       400
     );
+  }
+});
+
+// Every commenter in the sub gets (or refreshes) their live ELO flair — so a
+// rating shows up from engaging, not only from finishing a game.
+triggers.post('/on-comment-create', async (c) => {
+  try {
+    const input = await c.req.json<OnCommentCreateRequest>();
+    const username = input.author?.name;
+    if (username) await flairCommenter(username);
+    return c.json<TriggerResponse>(
+      { status: 'success', message: `flaired ${username ?? 'unknown'}` },
+      200
+    );
+  } catch (error) {
+    console.error(`on-comment-create flair failed: ${error}`);
+    return c.json<TriggerResponse>({ status: 'error', message: 'Failed to flair commenter' }, 400);
   }
 });
 

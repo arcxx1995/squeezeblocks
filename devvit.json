@@ -52,6 +52,7 @@
   },
   "triggers": {
     "onAppInstall": "/internal/triggers/on-app-install",
+    "onCommentCreate": "/internal/triggers/on-comment-create",
     "onPostDelete": "/internal/triggers/on-post-delete"
   },
   "scheduler": {
