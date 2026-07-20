@@ -25,7 +25,7 @@
     "@tailwindcss/vite": "^4.3.2",
     "@vitejs/plugin-react": "^6.0.3",
     "devvit": "0.13.6",
-    "hono": "4.12.27",
+    "hono": "4.12.31",
     "phaser": "4.2.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
